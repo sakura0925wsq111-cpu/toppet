@@ -14,9 +14,5 @@ __pycache__/
 Thumbs.db
 .DS_Store
 
-# Whisper model - managed by Git LFS
-assets/whisper_models/**/*.bin
-assets/whisper_models/**/*.onnx
-
 # Secrets
 api_key.txt
