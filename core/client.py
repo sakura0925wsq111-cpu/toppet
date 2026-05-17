@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
-AI ¿Í»§¶Ë ¡ª¡ª Óë´óÄ£ĞÍ API ½»»¥µÄ´¿Âß¼­²ã
+AI å®¢æˆ·ç«¯ â€”â€” ä¸å¤§æ¨¡å‹ API äº¤äº’çš„çº¯é€»è¾‘å±‚
 
-±¾Ä£¿é¸ºÔğ£º
-1. µ÷ÓÃ DeepSeek / OpenAI ¼æÈİ API ½øĞĞ¶Ô»°
-2. ²éÑ¯ÊµÊ±ÌìÆø£¨wttr.in£©
-3. »ñÈ¡±¾»úÊ±¼ä
-4. ¸ù¾İÓÃ»§ÊäÈëÅĞ¶ÏÊÇ·ñĞèÒª±¾µØ´¦Àí£¨ÌìÆø/Ê±¼ä£©
+æœ¬æ¨¡å—è´Ÿè´£ï¼š
+1. è°ƒç”¨ DeepSeek / OpenAI å…¼å®¹ API è¿›è¡Œå¯¹è¯
+2. æŸ¥è¯¢å®æ—¶å¤©æ°”ï¼ˆwttr.inï¼‰
+3. è·å–æœ¬æœºæ—¶é—´
+4. æ ¹æ®ç”¨æˆ·è¾“å…¥åˆ¤æ–­æ˜¯å¦éœ€è¦æœ¬åœ°å¤„ç†ï¼ˆå¤©æ°”/æ—¶é—´ï¼‰
 
-ËùÓĞ·½·¨¾ùÎª´¿ Python Âß¼­£¬²»ÒÀÀµ PyQt6¡£
-¿ÉÒÔÔÚ QThread¡¢asyncio¡¢»òÈÎÒâ Python »·¾³ÖĞµ÷ÓÃ¡£
+æ‰€æœ‰æ–¹æ³•å‡ä¸ºçº¯ Python é€»è¾‘ï¼Œä¸ä¾èµ– PyQt6ã€‚
+å¯ä»¥åœ¨ QThreadã€asyncioã€æˆ–ä»»æ„ Python ç¯å¢ƒä¸­è°ƒç”¨ã€‚
 """
 
 from __future__ import annotations
@@ -26,22 +26,22 @@ from openai import OpenAI
 
 from .config import WEEKDAY_NAMES, WEATHER_KEYWORDS
 
-# ´Ó emotion_scheduler µ¼ÈëÇéĞ÷Ïà¹Ø³£Á¿
-# ×¢Òâ£º±ÜÃâÑ­»·µ¼Èë£¬Ö»ÔÚĞèÒªÊ±ÑÓ³Ùµ¼Èë
+# ä» emotion_scheduler å¯¼å…¥æƒ…ç»ªç›¸å…³å¸¸é‡
+# æ³¨æ„ï¼šé¿å…å¾ªç¯å¯¼å…¥ï¼Œåªåœ¨éœ€è¦æ—¶å»¶è¿Ÿå¯¼å…¥
 
 
 # =============================================================================
-# AI »Ø¸´µÄÊı¾İ½á¹¹
+# AI å›å¤çš„æ•°æ®ç»“æ„
 # =============================================================================
 
 @dataclass
 class AIReply:
-    """AI »Ø¸´µÄ½á¹¹»¯Êı¾İ¡£
+    """AI å›å¤çš„ç»“æ„åŒ–æ•°æ®ã€‚
 
-    °üº¬Èı¸ö×Ö¶Î£º
-    - emotion: ÇéĞ÷±êÇ©£¨Èç HAPPY, SAD, NEUTRAL£©
-    - content: AI »Ø¸´µÄÎÄ±¾ÄÚÈİ
-    - is_local: ÊÇ·ñÎª±¾µØ´¦Àí£¨ÌìÆø/Ê±¼ä£©£¬¶ø·Çµ÷ÓÃ´óÄ£ĞÍ
+    åŒ…å«ä¸‰ä¸ªå­—æ®µï¼š
+    - emotion: æƒ…ç»ªæ ‡ç­¾ï¼ˆå¦‚ HAPPY, SAD, NEUTRALï¼‰
+    - content: AI å›å¤çš„æ–‡æœ¬å†…å®¹
+    - is_local: æ˜¯å¦ä¸ºæœ¬åœ°å¤„ç†ï¼ˆå¤©æ°”/æ—¶é—´ï¼‰ï¼Œè€Œéè°ƒç”¨å¤§æ¨¡å‹
     """
     emotion: str
     content: str
@@ -49,20 +49,20 @@ class AIReply:
 
 
 # =============================================================================
-# AIClient ¡ª¡ª ºËĞÄ¿Í»§¶Ë
+# AIClient â€”â€” æ ¸å¿ƒå®¢æˆ·ç«¯
 # =============================================================================
 
 class AIClient:
-    """AI ¿Í»§¶Ë ¡ª¡ª ·â×°ËùÓĞ¶ÔÍâ API µ÷ÓÃ¡£
+    """AI å®¢æˆ·ç«¯ â€”â€” å°è£…æ‰€æœ‰å¯¹å¤– API è°ƒç”¨ã€‚
 
-    ´¿ Python Àà£¬²»ÒÀÀµÈÎºÎ GUI ¿ò¼Ü¡£
-    ¿ÉÒÔ°²È«µØÔÚÈÎÒâÏß³ÌÖĞµ÷ÓÃ¡£
+    çº¯ Python ç±»ï¼Œä¸ä¾èµ–ä»»ä½• GUI æ¡†æ¶ã€‚
+    å¯ä»¥å®‰å…¨åœ°åœ¨ä»»æ„çº¿ç¨‹ä¸­è°ƒç”¨ã€‚
 
-    ÓÃ·¨£º
+    ç”¨æ³•ï¼š
         client = AIClient(api_key="sk-...", model="deepseek-chat")
 
-        # ´¦ÀíÓÃ»§ÊäÈë£¨×Ô¶¯ÅĞ¶ÏÌìÆø/Ê±¼ä/¶Ô»°£©
-        reply = client.process("½ñÌìÉÏº£ÌìÆøÔõÃ´Ñù", weather_city="ÉÏº£")
+        # å¤„ç†ç”¨æˆ·è¾“å…¥ï¼ˆè‡ªåŠ¨åˆ¤æ–­å¤©æ°”/æ—¶é—´/å¯¹è¯ï¼‰
+        reply = client.process("ä»Šå¤©ä¸Šæµ·å¤©æ°”æ€ä¹ˆæ ·", weather_city="ä¸Šæµ·")
         print(reply.emotion, reply.content)
     """
 
@@ -74,14 +74,14 @@ class AIClient:
         temperature: float = 0.9,
         max_tokens: int = 260,
     ):
-        """³õÊ¼»¯ AI ¿Í»§¶Ë¡£
+        """åˆå§‹åŒ– AI å®¢æˆ·ç«¯ã€‚
 
         Args:
-            api_key: DeepSeek / OpenAI ¼æÈİ API Key
-            base_url: API ¶ËµãµØÖ·
-            model: Ä£ĞÍÃû³Æ
-            temperature: Éú³ÉÎÂ¶È£¨0-2£¬Ô½¸ßÔ½Ëæ»ú£©
-            max_tokens: µ¥´Î»Ø¸´×î´ó token Êı
+            api_key: DeepSeek / OpenAI å…¼å®¹ API Key
+            base_url: API ç«¯ç‚¹åœ°å€
+            model: æ¨¡å‹åç§°
+            temperature: ç”Ÿæˆæ¸©åº¦ï¼ˆ0-2ï¼Œè¶Šé«˜è¶Šéšæœºï¼‰
+            max_tokens: å•æ¬¡å›å¤æœ€å¤§ token æ•°
         """
         self.api_key = api_key
         self.base_url = base_url
@@ -89,60 +89,60 @@ class AIClient:
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-        # Èç¹ûÃ»ÓĞ API Key£¬client Îª None
-        # ´ËÊ±Ö»ÄÜ´¦Àí±¾µØ²éÑ¯£¨ÌìÆø/Ê±¼ä£©£¬ÎŞ·¨½øĞĞ AI ¶Ô»°
+        # å¦‚æœæ²¡æœ‰ API Keyï¼Œclient ä¸º None
+        # æ­¤æ—¶åªèƒ½å¤„ç†æœ¬åœ°æŸ¥è¯¢ï¼ˆå¤©æ°”/æ—¶é—´ï¼‰ï¼Œæ— æ³•è¿›è¡Œ AI å¯¹è¯
         self._client: OpenAI | None = (
             OpenAI(api_key=api_key, base_url=base_url)
             if api_key
             else None
         )
 
-    # ¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T
-    # Ö÷Èë¿Ú£º´¦ÀíÓÃ»§ÊäÈë
-    # ¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # ä¸»å…¥å£ï¼šå¤„ç†ç”¨æˆ·è¾“å…¥
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     def process(
         self,
         user_text: str,
-        weather_city: str = "ÉÏº£",
+        weather_city: str = "ä¸Šæµ·",
         conversation_history: list[dict[str, str]] | None = None,
         system_prompt: str | None = None,
     ) -> AIReply:
-        """´¦ÀíÓÃ»§ÊäÈë£¬·µ»Ø AI »Ø¸´¡£
+        """å¤„ç†ç”¨æˆ·è¾“å…¥ï¼Œè¿”å› AI å›å¤ã€‚
 
-        ´¦ÀíË³Ğò£º
-        1. ÏÈÅĞ¶ÏÊÇ·ñÎªÌìÆø/Ê±¼äÎÊÌâ ¡ú ±¾µØ´¦Àí
-        2. ·ñÔò·¢ËÍ¸ø´óÄ£ĞÍ API
+        å¤„ç†é¡ºåºï¼š
+        1. å…ˆåˆ¤æ–­æ˜¯å¦ä¸ºå¤©æ°”/æ—¶é—´é—®é¢˜ â†’ æœ¬åœ°å¤„ç†
+        2. å¦åˆ™å‘é€ç»™å¤§æ¨¡å‹ API
 
         Args:
-            user_text: ÓÃ»§ÊäÈëÎÄ±¾
-            weather_city: Ä¬ÈÏÌìÆø²éÑ¯³ÇÊĞ
-            conversation_history: ÀúÊ·¶Ô»°ÏûÏ¢ÁĞ±í
-            system_prompt: ÏµÍ³ÌáÊ¾´Ê£¨ĞÔ¸ñÉè¶¨£©
+            user_text: ç”¨æˆ·è¾“å…¥æ–‡æœ¬
+            weather_city: é»˜è®¤å¤©æ°”æŸ¥è¯¢åŸå¸‚
+            conversation_history: å†å²å¯¹è¯æ¶ˆæ¯åˆ—è¡¨
+            system_prompt: ç³»ç»Ÿæç¤ºè¯ï¼ˆæ€§æ ¼è®¾å®šï¼‰
 
         Returns:
-            AIReply ½á¹¹»¯»Ø¸´
+            AIReply ç»“æ„åŒ–å›å¤
         """
-        # ©¤©¤ µÚÒ»²½£º±¾µØ´¦Àí£¨ÌìÆø/Ê±¼ä£©©¤©¤
+        # â”€â”€ ç¬¬ä¸€æ­¥ï¼šæœ¬åœ°å¤„ç†ï¼ˆå¤©æ°”/æ—¶é—´ï¼‰â”€â”€
         local_reply = self._build_local_reply(user_text, weather_city)
         if local_reply is not None:
             return local_reply
 
-        # ©¤©¤ µÚ¶ş²½£ºµ÷ÓÃ´óÄ£ĞÍ API ©¤©¤
+        # â”€â”€ ç¬¬äºŒæ­¥ï¼šè°ƒç”¨å¤§æ¨¡å‹ API â”€â”€
         if self._client is None:
             return AIReply(
                 emotion="SLEEPY",
                 content=(
-                    "´ô´ô±¦±¦£¬ÎÒÏÖÔÚ»¹Ã»ÅäÖÃ DEEPSEEK_API_KEY£¬"
-                    "ÆÕÍ¨ÁÄÌìÏÈ¿ª²»ÁË£»µ«ÎÊÊ±¼äºÍÌìÆøÎÒÄÜÖ±½Ó´ğ¡£"
+                    "å‘†å‘†å®å®ï¼Œæˆ‘ç°åœ¨è¿˜æ²¡é…ç½® DEEPSEEK_API_KEYï¼Œ"
+                    "æ™®é€šèŠå¤©å…ˆå¼€ä¸äº†ï¼›ä½†é—®æ—¶é—´å’Œå¤©æ°”æˆ‘èƒ½ç›´æ¥ç­”ã€‚"
                 ),
                 is_local=True,
             )
 
-        # ¹¹½¨ÏûÏ¢ÁĞ±í
+        # æ„å»ºæ¶ˆæ¯åˆ—è¡¨
         messages = self._build_messages(user_text, conversation_history, system_prompt)
 
-        # µ÷ÓÃ API ²¢½âÎö
+        # è°ƒç”¨ API å¹¶è§£æ
         result = self._request_ai_reply(messages)
         return AIReply(
             emotion=result["emotion"],
@@ -150,20 +150,20 @@ class AIClient:
             is_local=False,
         )
 
-    # ¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T
-    # ±¾µØ´¦Àí£ºÌìÆø + Ê±¼ä
-    # ¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # æœ¬åœ°å¤„ç†ï¼šå¤©æ°” + æ—¶é—´
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     def _build_local_reply(self, user_text: str, weather_city: str) -> AIReply | None:
-        """³¢ÊÔ±¾µØ´¦ÀíÌìÆø/Ê±¼äÎÊÌâ¡£
+        """å°è¯•æœ¬åœ°å¤„ç†å¤©æ°”/æ—¶é—´é—®é¢˜ã€‚
 
-        Èç¹ûÓÃ»§ÎÊµÄÊÇÊµÊ±ÌìÆø»òµ±Ç°Ê±¼ä£¬Ö±½Ó²éÑ¯ºó·µ»Ø£¬
-        ²»ĞèÒªµ÷ÓÃ´óÄ£ĞÍ£¨±ÜÃâÄ£ĞÍÏ¹±à£©¡£
+        å¦‚æœç”¨æˆ·é—®çš„æ˜¯å®æ—¶å¤©æ°”æˆ–å½“å‰æ—¶é—´ï¼Œç›´æ¥æŸ¥è¯¢åè¿”å›ï¼Œ
+        ä¸éœ€è¦è°ƒç”¨å¤§æ¨¡å‹ï¼ˆé¿å…æ¨¡å‹çç¼–ï¼‰ã€‚
 
         Returns:
-            Èç¹ûÆ¥Åäµ½±¾µØÎÊÌâÔò·µ»Ø AIReply£¬·ñÔò·µ»Ø None¡£
+            å¦‚æœåŒ¹é…åˆ°æœ¬åœ°é—®é¢˜åˆ™è¿”å› AIReplyï¼Œå¦åˆ™è¿”å› Noneã€‚
         """
-        # ÅĞ¶ÏÊÇ·ñÎÊÌìÆø
+        # åˆ¤æ–­æ˜¯å¦é—®å¤©æ°”
         if self.is_weather_question(user_text):
             day_offset = self.extract_weather_day_offset(user_text)
             if day_offset > 0:
@@ -172,24 +172,24 @@ class AIClient:
                 weather_text = self.get_weather(weather_city)
             return AIReply(
                 emotion="NEUTRAL",
-                content=f"´ô´ô±¦±¦£¬{weather_text}",
+                content=f"å‘†å‘†å®å®ï¼Œ{weather_text}",
                 is_local=True,
             )
 
-        # ÅĞ¶ÏÊÇ·ñÎÊÊ±¼ä
+        # åˆ¤æ–­æ˜¯å¦é—®æ—¶é—´
         if self.is_time_question(user_text):
             time_str = self.get_system_time()
             return AIReply(
                 emotion="HAPPY",
-                content=f"´ô´ô±¦±¦£¬ÏÖÔÚÊÇ {time_str}¡£",
+                content=f"å‘†å‘†å®å®ï¼Œç°åœ¨æ˜¯ {time_str}ã€‚",
                 is_local=True,
             )
 
         return None
 
-    # ¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T
-    # ´óÄ£ĞÍ API µ÷ÓÃ
-    # ¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # å¤§æ¨¡å‹ API è°ƒç”¨
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     def _build_messages(
         self,
@@ -197,21 +197,21 @@ class AIClient:
         conversation_history: list[dict[str, str]] | None,
         system_prompt: str | None,
     ) -> list[dict[str, str]]:
-        """¹¹½¨·¢ËÍ¸ø´óÄ£ĞÍµÄÏûÏ¢ÁĞ±í¡£
+        """æ„å»ºå‘é€ç»™å¤§æ¨¡å‹çš„æ¶ˆæ¯åˆ—è¡¨ã€‚
 
-        ½á¹¹£º[system_prompt] + [ÀúÊ·¶Ô»°] + [µ±Ç°ÓÃ»§ÊäÈë]
+        ç»“æ„ï¼š[system_prompt] + [å†å²å¯¹è¯] + [å½“å‰ç”¨æˆ·è¾“å…¥]
         """
         messages: list[dict[str, str]] = []
 
-        # ÏµÍ³ÌáÊ¾´Ê£¨ĞÔ¸ñÉè¶¨£©
+        # ç³»ç»Ÿæç¤ºè¯ï¼ˆæ€§æ ¼è®¾å®šï¼‰
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
 
-        # ÀúÊ·¶Ô»°
+        # å†å²å¯¹è¯
         if conversation_history:
             messages.extend(conversation_history)
 
-        # µ±Ç°ÓÃ»§ÊäÈë
+        # å½“å‰ç”¨æˆ·è¾“å…¥
         messages.append({"role": "user", "content": user_text})
 
         return messages
@@ -219,9 +219,9 @@ class AIClient:
     def _request_ai_reply(
         self, messages: list[dict[str, str]]
     ) -> dict[str, str]:
-        """µ÷ÓÃ´óÄ£ĞÍ API£¬·µ»Ø½âÎöºóµÄ {emotion, content}¡£
+        """è°ƒç”¨å¤§æ¨¡å‹ APIï¼Œè¿”å›è§£æåçš„ {emotion, content}ã€‚
 
-        Èç¹û JSON Ä£Ê½²»±»¼æÈİ½Ó¿ÚÖ§³Ö£¬Ôò×Ô¶¯½µ¼¶ÖØÊÔÒ»´Î¡£
+        å¦‚æœ JSON æ¨¡å¼ä¸è¢«å…¼å®¹æ¥å£æ”¯æŒï¼Œåˆ™è‡ªåŠ¨é™çº§é‡è¯•ä¸€æ¬¡ã€‚
         """
         request_args = {
             "model": self.model,
@@ -231,83 +231,83 @@ class AIClient:
         }
 
         try:
-            # ÓÅÏÈÊ¹ÓÃ JSON Ä£Ê½
+            # ä¼˜å…ˆä½¿ç”¨ JSON æ¨¡å¼
             completion = self._client.chat.completions.create(
                 **request_args,
                 response_format={"type": "json_object"},
             )
         except Exception as first_error:
-            # ²¿·Ö¼æÈİ½Ó¿Ú²»Ö§³Ö response_format£¬È¥µôºóÖØÊÔ
+            # éƒ¨åˆ†å…¼å®¹æ¥å£ä¸æ”¯æŒ response_formatï¼Œå»æ‰åé‡è¯•
             err_text = str(first_error).lower()
             if "response_format" not in err_text and "json" not in err_text:
                 raise
             completion = self._client.chat.completions.create(**request_args)
 
         text = completion.choices[0].message.content or "{}"
-        # Èç¹ûÄ£ĞÍ·µ»ØµÄÄÚÈİ¼¸ºõÊÇ¿ÕµÄ£¨¿ÕµÄ Markdown ´úÂë¿éµÈ£©£¬È¥µô response_format ÖØÊÔ
+        # å¦‚æœæ¨¡å‹è¿”å›çš„å†…å®¹å‡ ä¹æ˜¯ç©ºçš„ï¼ˆç©ºçš„ Markdown ä»£ç å—ç­‰ï¼‰ï¼Œå»æ‰ response_format é‡è¯•
         if not text.strip() or len(text.strip()) < 10:
             completion = self._client.chat.completions.create(**request_args)
             text = completion.choices[0].message.content or "{}"
         return self.normalize_ai_reply(self.parse_json_reply(text))
 
-    # ¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T
-    # ¾²Ì¬¹¤¾ß·½·¨
-    # ¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # é™æ€å·¥å…·æ–¹æ³•
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     @staticmethod
     def is_weather_question(text: str) -> bool:
-        """ÅĞ¶ÏÓÃ»§ÊÇ·ñÔÚÎÊÌìÆø¡£
+        """åˆ¤æ–­ç”¨æˆ·æ˜¯å¦åœ¨é—®å¤©æ°”ã€‚
 
-        ÃüÖĞºóÖ±½Ó×ßÊµÊ±ÌìÆø½Ó¿Ú£¬²»ÔÙÈÃÄ£ĞÍÏ¹²Â¡£
+        å‘½ä¸­åç›´æ¥èµ°å®æ—¶å¤©æ°”æ¥å£ï¼Œä¸å†è®©æ¨¡å‹ççŒœã€‚
         """
         lowered = text.lower()
         return any(keyword in lowered for keyword in WEATHER_KEYWORDS)
 
     @staticmethod
     def is_time_question(text: str) -> bool:
-        """ÅĞ¶ÏÓÃ»§ÊÇ·ñÔÚÎÊµ±Ç°Ê±¼ä»òÈÕÆÚ¡£"""
+        """åˆ¤æ–­ç”¨æˆ·æ˜¯å¦åœ¨é—®å½“å‰æ—¶é—´æˆ–æ—¥æœŸã€‚"""
         lowered = text.lower()
         patterns = [
-            r"(¼¸µã|¼¸ºÅ|ĞÇÆÚ¼¸|Àñ°İ¼¸|ÖÜ¼¸)",
-            r"(ÏÖÔÚ|µ±Ç°).*(Ê±¼ä|¼¸µã|ÈÕÆÚ)",
-            r"(½ñÌì|Ã÷Ìì|ºóÌì).*(ÈÕÆÚ|¼¸ºÅ|ĞÇÆÚ|ÖÜ¼¸|Àñ°İ)",
+            r"(å‡ ç‚¹|å‡ å·|æ˜ŸæœŸå‡ |ç¤¼æ‹œå‡ |å‘¨å‡ )",
+            r"(ç°åœ¨|å½“å‰).*(æ—¶é—´|å‡ ç‚¹|æ—¥æœŸ)",
+            r"(ä»Šå¤©|æ˜å¤©|åå¤©).*(æ—¥æœŸ|å‡ å·|æ˜ŸæœŸ|å‘¨å‡ |ç¤¼æ‹œ)",
             r"\b(time|date)\b",
         ]
         return any(re.search(pattern, lowered) for pattern in patterns)
 
     @staticmethod
     def get_system_time() -> str:
-        """»ñÈ¡µ±Ç°±¾»úÊ±¼ä£¬Ö±½ÓÓÃÓÚ»Ø´ğÊ±¼äÀàÎÊÌâ¡£"""
+        """è·å–å½“å‰æœ¬æœºæ—¶é—´ï¼Œç›´æ¥ç”¨äºå›ç­”æ—¶é—´ç±»é—®é¢˜ã€‚"""
         now = datetime.now()
         weekday = WEEKDAY_NAMES[now.weekday()]
-        return f"{now:%YÄê%mÔÂ%dÈÕ} {weekday} {now:%H:%M:%S}"
+        return f"{now:%Yå¹´%mæœˆ%dæ—¥} {weekday} {now:%H:%M:%S}"
 
     @staticmethod
     def extract_weather_day_offset(text: str) -> int:
-        """´ÓÓÃ»§ÎÄ±¾ÖĞÌáÈ¡ÌìÆø²éÑ¯µÄÌìÊıÆ«ÒÆ¡£
+        """ä»ç”¨æˆ·æ–‡æœ¬ä¸­æå–å¤©æ°”æŸ¥è¯¢çš„å¤©æ•°åç§»ã€‚
 
         Returns:
-            0 = ½ñÌì, 1 = Ã÷Ìì, 2 = ºóÌì
+            0 = ä»Šå¤©, 1 = æ˜å¤©, 2 = åå¤©
         """
         lowered = text.lower()
-        if any(w in lowered for w in ("ºóÌì", "day after tomorrow")):
+        if any(w in lowered for w in ("åå¤©", "day after tomorrow")):
             return 2
-        if any(w in lowered for w in ("Ã÷Ìì", "Ã÷ÈÕ", "tomorrow")):
+        if any(w in lowered for w in ("æ˜å¤©", "æ˜æ—¥", "tomorrow")):
             return 1
         return 0
 
     @staticmethod
-    def extract_weather_city(text: str, default_city: str = "ÉÏº£") -> str:
-        """´ÓÓÃ»§ÊäÈëÖĞ³¢ÊÔÌáÈ¡³ÇÊĞÃû³Æ¡£
+    def extract_weather_city(text: str, default_city: str = "ä¸Šæµ·") -> str:
+        """ä»ç”¨æˆ·è¾“å…¥ä¸­å°è¯•æå–åŸå¸‚åç§°ã€‚
 
-        Ö§³ÖÖĞÎÄºÍÓ¢ÎÄ³ÇÊĞÃû¡£ÌáÈ¡²»µ½Ê±·µ»ØÄ¬ÈÏ³ÇÊĞ¡£
+        æ”¯æŒä¸­æ–‡å’Œè‹±æ–‡åŸå¸‚åã€‚æå–ä¸åˆ°æ—¶è¿”å›é»˜è®¤åŸå¸‚ã€‚
         """
-        # ³¢ÊÔÆ¥ÅäÖĞÎÄ³ÇÊĞÃû
-        cn_match = re.search(r"([Ò»-ı›]{2,12})(?:µÄ)?(?:ÌìÆø|ÆøÎÂ|ÎÂ¶È)", text)
+        # å°è¯•åŒ¹é…ä¸­æ–‡åŸå¸‚å
+        cn_match = re.search(r"([ä¸€-é¾¥]{2,12})(?:çš„)?(?:å¤©æ°”|æ°”æ¸©|æ¸©åº¦)", text)
         if cn_match:
             return AIClient._clean_city_name(cn_match.group(1)) or default_city
 
-        # ³¢ÊÔÆ¥ÅäÓ¢ÎÄ³ÇÊĞÃû
+        # å°è¯•åŒ¹é…è‹±æ–‡åŸå¸‚å
         en_patterns = [
             r"(?:weather|temperature)\s+(?:in\s+)?([a-zA-Z][a-zA-Z\s-]{1,30})",
             r"(?:in|for)\s+([a-zA-Z][a-zA-Z\s-]{1,30})\s+(?:weather|temperature)",
@@ -323,19 +323,19 @@ class AIClient:
 
     @staticmethod
     def _clean_city_name(city: str) -> str | None:
-        """ÇåÀí³ÇÊĞÃû³ÆÖĞµÄ¿ÚÓïÇ°ºó×º¡£
+        """æ¸…ç†åŸå¸‚åç§°ä¸­çš„å£è¯­å‰åç¼€ã€‚
 
-        È¥µô"°ïÎÒ²é""½ñÌì"µÈÇ°×º£¬±ÜÃâ°ÑËüÃÇµ±³É³ÇÊĞÃû¡£
+        å»æ‰"å¸®æˆ‘æŸ¥""ä»Šå¤©"ç­‰å‰ç¼€ï¼Œé¿å…æŠŠå®ƒä»¬å½“æˆåŸå¸‚åã€‚
         """
-        city = city.strip(" £¬¡££¡£¿?µÄ")
+        city = city.strip(" ï¼Œã€‚ï¼ï¼Ÿ?çš„")
         prefixes = (
-            "°ïÎÒ²éÒ»ÏÂ", "°ïÎÒ²é²é", "°ïÎÒ²é", "²éÒ»ÏÂ", "²éÑ¯", "²é²é",
-            "¿´¿´", "¿´ÏÂ", "¸æËßÎÒ", "ÇëÎÊ",
-            "½ñÌì", "Ã÷Ìì", "ºóÌì", "ÏÖÔÚ", "µ±Ç°",
+            "å¸®æˆ‘æŸ¥ä¸€ä¸‹", "å¸®æˆ‘æŸ¥æŸ¥", "å¸®æˆ‘æŸ¥", "æŸ¥ä¸€ä¸‹", "æŸ¥è¯¢", "æŸ¥æŸ¥",
+            "çœ‹çœ‹", "çœ‹ä¸‹", "å‘Šè¯‰æˆ‘", "è¯·é—®",
+            "ä»Šå¤©", "æ˜å¤©", "åå¤©", "ç°åœ¨", "å½“å‰",
         )
         suffixes = (
-            "½ñÌì", "Ã÷Ìì", "ºóÌì", "ÏÖÔÚ", "µ±Ç°",
-            "Õâ±ß", "ÄÇÀï", "ÄÄÀï", "ÔõÃ´Ñù",
+            "ä»Šå¤©", "æ˜å¤©", "åå¤©", "ç°åœ¨", "å½“å‰",
+            "è¿™è¾¹", "é‚£é‡Œ", "å“ªé‡Œ", "æ€ä¹ˆæ ·",
         )
 
         changed = True
@@ -343,26 +343,26 @@ class AIClient:
             changed = False
             for prefix in prefixes:
                 if city.startswith(prefix):
-                    city = city[len(prefix):].strip(" £¬¡££¡£¿?µÄ")
+                    city = city[len(prefix):].strip(" ï¼Œã€‚ï¼ï¼Ÿ?çš„")
                     changed = True
             for suffix in suffixes:
                 if city.endswith(suffix):
-                    city = city[:-len(suffix)].strip(" £¬¡££¡£¿?µÄ")
+                    city = city[:-len(suffix)].strip(" ï¼Œã€‚ï¼ï¼Ÿ?çš„")
                     changed = True
 
-        invalid_names = {"½ñÌì", "Ã÷Ìì", "ºóÌì", "ÏÖÔÚ", "µ±Ç°", "ÕâÀï", "±¾µØ", "ÌìÆø", "ÆøÎÂ", "ÎÂ¶È"}
+        invalid_names = {"ä»Šå¤©", "æ˜å¤©", "åå¤©", "ç°åœ¨", "å½“å‰", "è¿™é‡Œ", "æœ¬åœ°", "å¤©æ°”", "æ°”æ¸©", "æ¸©åº¦"}
         if not city or city in invalid_names:
             return None
         return city
 
     @staticmethod
     def parse_json_reply(text: str) -> dict[str, Any]:
-        """½âÎöÄ£ĞÍ·µ»ØµÄ JSON¡£
+        """è§£ææ¨¡å‹è¿”å›çš„ JSONã€‚
 
-        ¼´Ê¹Ä£ĞÍ°üÁË Markdown ´úÂë¿é£¬Ò²¾¡Á¿ÌáÈ¡ JSON¡£
+        å³ä½¿æ¨¡å‹åŒ…äº† Markdown ä»£ç å—ï¼Œä¹Ÿå°½é‡æå– JSONã€‚
         """
         cleaned = (text or "").strip()
-        # È¥³ı Markdown ´úÂë¿é±ê¼Ç
+        # å»é™¤ Markdown ä»£ç å—æ ‡è®°
         cleaned = re.sub(
             r"^```(?:json)?\s*|\s*```$",
             "",
@@ -371,19 +371,19 @@ class AIClient:
         ).strip()
 
         if not cleaned:
-            return {"emotion": "NEUTRAL", "content": "´ô´ô±¦±¦£¬ÎÒ¸Õ¸ÕÃ»×éÖ¯ºÃÓïÑÔ£¬ÔÙÎÊÎÒÒ»´Î¡£"}
+            return {"emotion": "NEUTRAL", "content": "å‘†å‘†å®å®ï¼Œæˆ‘åˆšåˆšæ²¡ç»„ç»‡å¥½è¯­è¨€ï¼Œå†é—®æˆ‘ä¸€æ¬¡ã€‚"}
 
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
-            # ³¢ÊÔ´ÓÎÄ±¾ÖĞÌáÈ¡µÚÒ»¸ö JSON ¶ÔÏó
+            # å°è¯•ä»æ–‡æœ¬ä¸­æå–ç¬¬ä¸€ä¸ª JSON å¯¹è±¡
             match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
             if not match:
-                return {"emotion": "NEUTRAL", "content": "´ô´ô±¦±¦£¬ÎÒ¸Õ¸ÕÃ»×éÖ¯ºÃÓïÑÔ£¬ÔÙÎÊÎÒÒ»´Î¡£"}
+                return {"emotion": "NEUTRAL", "content": "å‘†å‘†å®å®ï¼Œæˆ‘åˆšåˆšæ²¡ç»„ç»‡å¥½è¯­è¨€ï¼Œå†é—®æˆ‘ä¸€æ¬¡ã€‚"}
             data = json.loads(match.group(0))
 
         if not isinstance(data, dict):
-            raise ValueError("Ä£ĞÍ·µ»ØµÄ JSON ²»ÊÇ¶ÔÏó")
+            raise ValueError("æ¨¡å‹è¿”å›çš„ JSON ä¸æ˜¯å¯¹è±¡")
         return data
 
     @staticmethod
@@ -392,16 +392,16 @@ class AIClient:
         emotion_aliases: dict[str, str] | None = None,
         valid_emotions: set[str] | None = None,
     ) -> dict[str, str]:
-        """Í³Ò»Ğ£ÑéÄ£ĞÍ»Ø¸´£¬·ÀÖ¹ÇéĞ÷±êÇ©»òÕıÎÄÈ±Ê§¡£
+        """ç»Ÿä¸€æ ¡éªŒæ¨¡å‹å›å¤ï¼Œé˜²æ­¢æƒ…ç»ªæ ‡ç­¾æˆ–æ­£æ–‡ç¼ºå¤±ã€‚
 
-        ÑÓ³Ùµ¼Èë emotion_scheduler ³£Á¿ÒÔ±ÜÃâÑ­»·ÒÀÀµ¡£
+        å»¶è¿Ÿå¯¼å…¥ emotion_scheduler å¸¸é‡ä»¥é¿å…å¾ªç¯ä¾èµ–ã€‚
 
         Args:
-            data: Ä£ĞÍ·µ»ØµÄÔ­Ê¼×Öµä
-            emotion_aliases: ÇéĞ÷±ğÃûÓ³Éä£¨¿ÉÑ¡£¬ÔËĞĞÊ±´«Èë£©
-            valid_emotions: ºÏ·¨ÇéĞ÷¼¯ºÏ£¨¿ÉÑ¡£¬ÔËĞĞÊ±´«Èë£©
+            data: æ¨¡å‹è¿”å›çš„åŸå§‹å­—å…¸
+            emotion_aliases: æƒ…ç»ªåˆ«åæ˜ å°„ï¼ˆå¯é€‰ï¼Œè¿è¡Œæ—¶ä¼ å…¥ï¼‰
+            valid_emotions: åˆæ³•æƒ…ç»ªé›†åˆï¼ˆå¯é€‰ï¼Œè¿è¡Œæ—¶ä¼ å…¥ï¼‰
         """
-        # ÑÓ³Ùµ¼ÈëÒÔ±ÜÃâÑ­»·ÒÀÀµ
+        # å»¶è¿Ÿå¯¼å…¥ä»¥é¿å…å¾ªç¯ä¾èµ–
         if emotion_aliases is None or valid_emotions is None:
             from emotion_scheduler import EMOTION_ALIASES, VALID_EMOTIONS
             if emotion_aliases is None:
@@ -419,30 +419,30 @@ class AIClient:
 
         content = str(data.get("content", "")).strip()
         if not content:
-            content = "´ô´ô±¦±¦£¬ÎÒ¸Õ¸ÕÃ»×éÖ¯ºÃÓïÑÔ£¬ÔÙÎÊÎÒÒ»´Î¡£"
+            content = "å‘†å‘†å®å®ï¼Œæˆ‘åˆšåˆšæ²¡ç»„ç»‡å¥½è¯­è¨€ï¼Œå†é—®æˆ‘ä¸€æ¬¡ã€‚"
 
         return {"emotion": emotion, "content": content}
 
-    # ¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T
-    # ÌìÆø API
-    # ¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T¨T
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    # å¤©æ°” API
+    # â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
     @staticmethod
     def _weather_description(current: dict[str, Any]) -> str:
-        """´Ó wttr.in µÄ·µ»ØÖµÖĞÓÅÏÈÈ¡ÖĞÎÄÌìÆøÃèÊö¡£"""
+        """ä» wttr.in çš„è¿”å›å€¼ä¸­ä¼˜å…ˆå–ä¸­æ–‡å¤©æ°”æè¿°ã€‚"""
         for key in ("lang_zh", "weatherDesc"):
             values = current.get(key) or []
             if values and values[0].get("value"):
                 return str(values[0]["value"])
-        return "ÌìÆøÇé¿öÎ´Öª"
+        return "å¤©æ°”æƒ…å†µæœªçŸ¥"
 
     @staticmethod
     def get_weather(city: str) -> str:
-        """²éÑ¯ÊµÊ±ÌìÆø¡£
+        """æŸ¥è¯¢å®æ—¶å¤©æ°”ã€‚
 
-        Ê§°ÜÊ±ËµÃ÷Ô­Òò£¬²»ÔÙ·µ»Ø¹Ì¶¨Ä£ÄâÊı¾İ¡£
+        å¤±è´¥æ—¶è¯´æ˜åŸå› ï¼Œä¸å†è¿”å›å›ºå®šæ¨¡æ‹Ÿæ•°æ®ã€‚
         """
-        city = (city or "").strip() or "ÉÏº£"
+        city = (city or "").strip() or "ä¸Šæµ·"
         try:
             resp = requests.get(
                 f"https://wttr.in/{quote(city)}",
@@ -454,7 +454,7 @@ class AIClient:
             payload = resp.json()
             current = payload.get("current_condition", [{}])[0]
             if not current:
-                raise ValueError("ÌìÆø·şÎñ·µ»Ø¿ÕÊı¾İ")
+                raise ValueError("å¤©æ°”æœåŠ¡è¿”å›ç©ºæ•°æ®")
 
             desc = AIClient._weather_description(current)
             temp = current.get("temp_C")
@@ -462,30 +462,30 @@ class AIClient:
             humidity = current.get("humidity")
             wind = current.get("windspeedKmph")
 
-            parts = [f"{city}ÏÖÔÚ{desc}"]
+            parts = [f"{city}ç°åœ¨{desc}"]
             if temp not in (None, ""):
-                parts.append(f"{temp}¡ãC")
+                parts.append(f"{temp}Â°C")
             if feels_like not in (None, ""):
-                parts.append(f"Ìå¸Ğ {feels_like}¡ãC")
+                parts.append(f"ä½“æ„Ÿ {feels_like}Â°C")
             if humidity not in (None, ""):
-                parts.append(f"Êª¶È {humidity}%")
+                parts.append(f"æ¹¿åº¦ {humidity}%")
             if wind not in (None, ""):
-                parts.append(f"·çËÙ {wind} km/h")
-            return "£¬".join(parts) + "¡£"
+                parts.append(f"é£é€Ÿ {wind} km/h")
+            return "ï¼Œ".join(parts) + "ã€‚"
         except requests.Timeout:
-            return f"ÔİÊ±²é²»µ½ {city} µÄÊµÊ±ÌìÆø£ºÌìÆø·şÎñÏìÓ¦³¬Ê±£¬ÉÔºóÔÙÊÔÒ»ÏÂ¡£"
+            return f"æš‚æ—¶æŸ¥ä¸åˆ° {city} çš„å®æ—¶å¤©æ°”ï¼šå¤©æ°”æœåŠ¡å“åº”è¶…æ—¶ï¼Œç¨åå†è¯•ä¸€ä¸‹ã€‚"
         except requests.RequestException:
-            return f"ÔİÊ±²é²»µ½ {city} µÄÊµÊ±ÌìÆø£ºÍøÂç»òÌìÆø·şÎñ²»¿ÉÓÃ¡£"
+            return f"æš‚æ—¶æŸ¥ä¸åˆ° {city} çš„å®æ—¶å¤©æ°”ï¼šç½‘ç»œæˆ–å¤©æ°”æœåŠ¡ä¸å¯ç”¨ã€‚"
         except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
-            return f"ÔİÊ±²é²»µ½ {city} µÄÊµÊ±ÌìÆø£ºÌìÆø·şÎñ·µ»ØµÄÊı¾İ¸ñÊ½Òì³£¡£"
+            return f"æš‚æ—¶æŸ¥ä¸åˆ° {city} çš„å®æ—¶å¤©æ°”ï¼šå¤©æ°”æœåŠ¡è¿”å›çš„æ•°æ®æ ¼å¼å¼‚å¸¸ã€‚"
 
     @staticmethod
     def get_weather_forecast(city: str, day_offset: int) -> str:
-        """²éÑ¯ÌìÆøÔ¤±¨£¨Ã÷Ìì/ºóÌì£©¡£
+        """æŸ¥è¯¢å¤©æ°”é¢„æŠ¥ï¼ˆæ˜å¤©/åå¤©ï¼‰ã€‚
 
-        Ê¹ÓÃ wttr.in µÄ weather Êı×é¡£
+        ä½¿ç”¨ wttr.in çš„ weather æ•°ç»„ã€‚
         """
-        city = (city or "").strip() or "ÉÏº£"
+        city = (city or "").strip() or "ä¸Šæµ·"
         try:
             resp = requests.get(
                 f"https://wttr.in/{quote(city)}",
@@ -497,42 +497,42 @@ class AIClient:
             payload = resp.json()
             weather_days = payload.get("weather", [])
             if len(weather_days) <= day_offset:
-                raise ValueError("ÌìÆø·şÎñÎ´·µ»Ø¸ÃÈÕÔ¤±¨")
+                raise ValueError("å¤©æ°”æœåŠ¡æœªè¿”å›è¯¥æ—¥é¢„æŠ¥")
 
             day = weather_days[day_offset]
             date_str = day.get("date", "")
             max_temp = day.get("maxtempC", "")
             min_temp = day.get("mintempC", "")
 
-            # È¡ÖĞÎçÊ±¶ÎµÄÌìÆøÃèÊö×÷Îªµ±ÈÕ´ú±í
+            # å–ä¸­åˆæ—¶æ®µçš„å¤©æ°”æè¿°ä½œä¸ºå½“æ—¥ä»£è¡¨
             hourly = day.get("hourly", [])
             mid_index = min(len(hourly) // 2, len(hourly) - 1) if hourly else 0
             desc = (
                 AIClient._weather_description(hourly[mid_index])
                 if hourly
-                else "ÌìÆøÇé¿öÎ´Öª"
+                else "å¤©æ°”æƒ…å†µæœªçŸ¥"
             )
 
-            # ÈÕÆÚ¸ñÊ½»¯
+            # æ—¥æœŸæ ¼å¼åŒ–
             try:
                 date_obj = datetime.strptime(date_str, "%Y-%m-%d")
                 weekday = WEEKDAY_NAMES[date_obj.weekday()]
-                date_label = f"{date_obj.month}ÔÂ{date_obj.day}ÈÕ {weekday}"
+                date_label = f"{date_obj.month}æœˆ{date_obj.day}æ—¥ {weekday}"
             except (ValueError, TypeError):
                 date_label = date_str
 
-            day_labels = {0: "½ñÌì", 1: "Ã÷Ìì", 2: "ºóÌì"}
+            day_labels = {0: "ä»Šå¤©", 1: "æ˜å¤©", 2: "åå¤©"}
             label = day_labels.get(day_offset, date_label)
 
-            parts = [f"{city}{label}£¨{date_label}£©{desc}"]
+            parts = [f"{city}{label}ï¼ˆ{date_label}ï¼‰{desc}"]
             if max_temp not in (None, ""):
-                parts.append(f"×î¸ß {max_temp}¡ãC")
+                parts.append(f"æœ€é«˜ {max_temp}Â°C")
             if min_temp not in (None, ""):
-                parts.append(f"×îµÍ {min_temp}¡ãC")
-            return "£¬".join(parts) + "¡£"
+                parts.append(f"æœ€ä½ {min_temp}Â°C")
+            return "ï¼Œ".join(parts) + "ã€‚"
         except requests.Timeout:
-            return f"ÔİÊ±²é²»µ½ {city} µÄÌìÆøÔ¤±¨£ºÌìÆø·şÎñÏìÓ¦³¬Ê±£¬ÉÔºóÔÙÊÔÒ»ÏÂ¡£"
+            return f"æš‚æ—¶æŸ¥ä¸åˆ° {city} çš„å¤©æ°”é¢„æŠ¥ï¼šå¤©æ°”æœåŠ¡å“åº”è¶…æ—¶ï¼Œç¨åå†è¯•ä¸€ä¸‹ã€‚"
         except requests.RequestException:
-            return f"ÔİÊ±²é²»µ½ {city} µÄÌìÆøÔ¤±¨£ºÍøÂç»òÌìÆø·şÎñ²»¿ÉÓÃ¡£"
+            return f"æš‚æ—¶æŸ¥ä¸åˆ° {city} çš„å¤©æ°”é¢„æŠ¥ï¼šç½‘ç»œæˆ–å¤©æ°”æœåŠ¡ä¸å¯ç”¨ã€‚"
         except (ValueError, KeyError, IndexError, TypeError, json.JSONDecodeError):
-            return f"ÔİÊ±²é²»µ½ {city} µÄÌìÆøÔ¤±¨£ºÌìÆø·şÎñ·µ»ØµÄÊı¾İ¸ñÊ½Òì³£¡£"
+            return f"æš‚æ—¶æŸ¥ä¸åˆ° {city} çš„å¤©æ°”é¢„æŠ¥ï¼šå¤©æ°”æœåŠ¡è¿”å›çš„æ•°æ®æ ¼å¼å¼‚å¸¸ã€‚"

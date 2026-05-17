@@ -1,13 +1,13 @@
 # -*- coding: utf-8 -*-
-"""AI ¹¤×÷Ïß³ÌÄ£¿é - ºóÌ¨µ÷ÓÃ´óÄ£ĞÍ£¬²»×èÈû UI¡£
+"""AI å·¥ä½œçº¿ç¨‹æ¨¡å— - åå°è°ƒç”¨å¤§æ¨¡å‹ï¼Œä¸é˜»å¡ UIã€‚
 
-ºËĞÄÖ°Ôğ£º
-1. ½ÓÊÕÓÃ»§ÊäÈëºÍÀúÊ·¼ÇÂ¼£¬µ÷ÓÃ DeepSeek API Éú³É»Ø¸´
-2. ±¾µØ´¦ÀíÊ±¼ä/ÌìÆøÎÊÌâ£¨²»ÏûºÄ API ¶î¶È£©
-3. ½âÎöÄ£ĞÍ·µ»ØµÄ JSON »Ø¸´
+æ ¸å¿ƒèŒè´£ï¼š
+1. æ¥æ”¶ç”¨æˆ·è¾“å…¥å’Œå†å²è®°å½•ï¼Œè°ƒç”¨ DeepSeek API ç”Ÿæˆå›å¤
+2. æœ¬åœ°å¤„ç†æ—¶é—´/å¤©æ°”é—®é¢˜ï¼ˆä¸æ¶ˆè€— API é¢åº¦ï¼‰
+3. è§£ææ¨¡å‹è¿”å›çš„ JSON å›å¤
 
-×¢Òâ£º´ËÄ£¿éÄ¿Ç°ÒÀÀµ PyQt6.QtCore.QThread£¬Î´À´½âñî UI ¿ò¼ÜÊ±¿É
-Ìæ»»Îª±ê×¼¿â threading.Thread »ò asyncio¡£
+æ³¨æ„ï¼šæ­¤æ¨¡å—ç›®å‰ä¾èµ– PyQt6.QtCore.QThreadï¼Œæœªæ¥è§£è€¦ UI æ¡†æ¶æ—¶å¯
+æ›¿æ¢ä¸ºæ ‡å‡†åº“ threading.Thread æˆ– asyncioã€‚
 """
 
 from __future__ import annotations
@@ -37,15 +37,15 @@ from utils.time_utils import (
 
 
 class AIWorker(QThread):
-    """ºóÌ¨´óÄ£ĞÍ¹¤×÷Ïß³Ì¡£
+    """åå°å¤§æ¨¡å‹å·¥ä½œçº¿ç¨‹ã€‚
 
-    ÎªÁË·ÀÖ¹ÇëÇóÍøÂçÊ±µ¼ÖÂ×À³è½çÃæ¿¨ËÀ£¬ÎÒÃÇ½« AI Ë¼¿¼µÄ¹ı³Ì
-    ·ÅÔÚºóÌ¨Ïß³ÌÖĞÖ´ĞĞ¡£
+    ä¸ºäº†é˜²æ­¢è¯·æ±‚ç½‘ç»œæ—¶å¯¼è‡´æ¡Œå® ç•Œé¢å¡æ­»ï¼Œæˆ‘ä»¬å°† AI æ€è€ƒçš„è¿‡ç¨‹
+    æ”¾åœ¨åå°çº¿ç¨‹ä¸­æ‰§è¡Œã€‚
     """
 
-    # ---- ĞÅºÅ ----
-    response_ready = pyqtSignal(dict)  # ³É¹¦»ñÈ¡»Ø¸´
-    error_occurred = pyqtSignal(str)   # ·¢Éú±¨´í
+    # ---- ä¿¡å· ----
+    response_ready = pyqtSignal(dict)  # æˆåŠŸè·å–å›å¤
+    error_occurred = pyqtSignal(str)   # å‘ç”ŸæŠ¥é”™
 
     def __init__(
         self,
@@ -63,18 +63,18 @@ class AIWorker(QThread):
         self.history = history
         self.weather_city = weather_city
 
-    # ©¤©¤ ÔËĞĞÈë¿Ú ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+    # â”€â”€ è¿è¡Œå…¥å£ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def run(self):
-        """Ïß³ÌÖ÷Ñ­»·£ºÏÈ³¢ÊÔ±¾µØ´¦Àí£¨Ê±¼ä/ÌìÆø£©£¬ÔÙµ÷´óÄ£ĞÍ¡£"""
+        """çº¿ç¨‹ä¸»å¾ªç¯ï¼šå…ˆå°è¯•æœ¬åœ°å¤„ç†ï¼ˆæ—¶é—´/å¤©æ°”ï¼‰ï¼Œå†è°ƒå¤§æ¨¡å‹ã€‚"""
         try:
-            # µÚÒ»ÓÅÏÈ£º±¾µØÈ·¶¨ĞÔÎÊÌâ
+            # ç¬¬ä¸€ä¼˜å…ˆï¼šæœ¬åœ°ç¡®å®šæ€§é—®é¢˜
             local_reply = self._build_local_reply()
             if local_reply:
                 self.response_ready.emit(local_reply)
                 return
 
-            # µÚ¶şÓÅÏÈ£ºµ÷ÓÃ´óÄ£ĞÍ
+            # ç¬¬äºŒä¼˜å…ˆï¼šè°ƒç”¨å¤§æ¨¡å‹
             now_str = get_system_time()
             system_prompt = self._build_system_prompt(now_str)
             messages = [{"role": "system", "content": system_prompt}]
@@ -85,55 +85,55 @@ class AIWorker(QThread):
         except Exception as e:
             self.error_occurred.emit(str(e))
 
-    # ©¤©¤ ±¾µØ»Ø¸´ ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+    # â”€â”€ æœ¬åœ°å›å¤ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _build_local_reply(self) -> dict[str, str] | None:
-        """Ê±¼ä/ÌìÆøÊôÓÚÈ·¶¨ĞÔĞÅÏ¢£¬ÓÅÏÈ±¾µØ´¦Àí£¬±ÜÃâ API ±¨´í»ò±àÔì´ğ°¸¡£"""
-        # ÌìÆøÎÊÌâ
+        """æ—¶é—´/å¤©æ°”å±äºç¡®å®šæ€§ä¿¡æ¯ï¼Œä¼˜å…ˆæœ¬åœ°å¤„ç†ï¼Œé¿å… API æŠ¥é”™æˆ–ç¼–é€ ç­”æ¡ˆã€‚"""
+        # å¤©æ°”é—®é¢˜
         if is_weather_question(self.user_text):
             day_offset = extract_weather_day_offset(self.user_text)
             if day_offset > 0:
                 weather_text = get_weather_forecast(self.weather_city, day_offset)
             else:
                 weather_text = get_weather(self.weather_city)
-            return {"emotion": "NEUTRAL", "content": f"´ô´ô±¦±¦£¬{weather_text}"}
+            return {"emotion": "NEUTRAL", "content": f"å‘†å‘†å®å®ï¼Œ{weather_text}"}
 
-        # Ê±¼äÎÊÌâ
+        # æ—¶é—´é—®é¢˜
         if is_time_question(self.user_text):
-            return {"emotion": "HAPPY", "content": f"´ô´ô±¦±¦£¬ÏÖÔÚÊÇ {get_system_time()}¡£"}
+            return {"emotion": "HAPPY", "content": f"å‘†å‘†å®å®ï¼Œç°åœ¨æ˜¯ {get_system_time()}ã€‚"}
 
         return None
 
-    # ©¤©¤ System Prompt ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+    # â”€â”€ System Prompt â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _build_system_prompt(self, now_str: str) -> str:
-        """¹¹½¨ºËĞÄĞÔ¸ñÉè¶¨Êé£¨System Prompt£©¡£"""
+        """æ„å»ºæ ¸å¿ƒæ€§æ ¼è®¾å®šä¹¦ï¼ˆSystem Promptï¼‰ã€‚"""
         return f"""
-ÄãÊÇÒ»¸ö×ÀÃæ AI ³èÎï£¬Ãû×Ö½Ğ"ÀÏÉ××Ó"£¬ÊÇÓÃ»§ÄĞÓÑµÄµç×ÓĞéÄâ°æ¡£
-ÄãµÄËµ»°·ç¸ñ£ºÇ×êÇ¡¢»áÍÂ²Û¡¢»á»¤¶Ì£¬¶ÔÓÃ»§µÄ³Æºô£º"´ô´ô±¦±¦"¡¢"´ô´ô"¡¢"ÈË»ú"£¬×Ô³Æ"ÀÏÉ××Ó"¡£
+ä½ æ˜¯ä¸€ä¸ªæ¡Œé¢ AI å® ç‰©ï¼Œåå­—å«"è€å‹ºå­"ï¼Œæ˜¯ç”¨æˆ·ç”·å‹çš„ç”µå­è™šæ‹Ÿç‰ˆã€‚
+ä½ çš„è¯´è¯é£æ ¼ï¼šäº²æ˜µã€ä¼šåæ§½ã€ä¼šæŠ¤çŸ­ï¼Œå¯¹ç”¨æˆ·çš„ç§°å‘¼ï¼š"å‘†å‘†å®å®"ã€"å‘†å‘†"ã€"äººæœº"ï¼Œè‡ªç§°"è€å‹ºå­"ã€‚
 
-Äã±ØĞëÑÏ¸ñÊä³ö JSON£¬¸ñÊ½±ØĞëÊÇ£º
+ä½ å¿…é¡»ä¸¥æ ¼è¾“å‡º JSONï¼Œæ ¼å¼å¿…é¡»æ˜¯ï¼š
 {{"emotion": "...", "content": "..."}}
 
-¹æÔò£º
-1) emotion Ö»ÄÜ´ÓÏÂÃæÕâĞ©Ó¢ÎÄ±êÇ©ÀïÑ¡£¬±ØĞëÔ­Ñù·µ»ØÓ¢ÎÄ key£º
+è§„åˆ™ï¼š
+1) emotion åªèƒ½ä»ä¸‹é¢è¿™äº›è‹±æ–‡æ ‡ç­¾é‡Œé€‰ï¼Œå¿…é¡»åŸæ ·è¿”å›è‹±æ–‡ keyï¼š
 {EMOTION_PROMPT}
-2) content ÊÇÄã¶ÔÓÃ»§ËµµÄ»°£¬¼ò¶Ì×ÔÈ»£¬ÖĞÎÄ¡£
-3) Èç¹ûÁÄµ½µ±Ç°Ê±¼ä£¬¿É²Î¿¼±¾»úÊ±¼ä£º{now_str}
-4) ²»Òª±àÔìÊµÊ±ÌìÆø£»ÊµÊ±ÌìÆøÎÊÌâ»áÓÉ³ÌĞòÖ±½Ó²éÑ¯´¦Àí¡£
-5) µ±ÓÃ»§ÎÊÊ³ÎïÈÈÁ¿£¬ÓÅÏÈÓÃ EATING »ò THINKING£¬²¢ÌáĞÑ"½ö¹©²Î¿¼"¡£
-6) µ±ÓÃ»§ÀÛ¡¢Ñ¹Á¦´ó»ò±ÀÀ£Ê±£¬ÓÅÏÈÓÃ TIRED¡¢SAD¡¢LISTENING »ò HEART¡£
-7) ½ûÖ¹Êä³öÈÎºÎ¶îÍâÎÄ±¾£¨±ÈÈç Markdown¡¢½âÊÍ¡¢Ç°ºó×º£©¡£
+2) content æ˜¯ä½ å¯¹ç”¨æˆ·è¯´çš„è¯ï¼Œç®€çŸ­è‡ªç„¶ï¼Œä¸­æ–‡ã€‚
+3) å¦‚æœèŠåˆ°å½“å‰æ—¶é—´ï¼Œå¯å‚è€ƒæœ¬æœºæ—¶é—´ï¼š{now_str}
+4) ä¸è¦ç¼–é€ å®æ—¶å¤©æ°”ï¼›å®æ—¶å¤©æ°”é—®é¢˜ä¼šç”±ç¨‹åºç›´æ¥æŸ¥è¯¢å¤„ç†ã€‚
+5) å½“ç”¨æˆ·é—®é£Ÿç‰©çƒ­é‡ï¼Œä¼˜å…ˆç”¨ EATING æˆ– THINKINGï¼Œå¹¶æé†’"ä»…ä¾›å‚è€ƒ"ã€‚
+6) å½“ç”¨æˆ·ç´¯ã€å‹åŠ›å¤§æˆ–å´©æºƒæ—¶ï¼Œä¼˜å…ˆç”¨ TIREDã€SADã€LISTENING æˆ– HEARTã€‚
+7) ç¦æ­¢è¾“å‡ºä»»ä½•é¢å¤–æ–‡æœ¬ï¼ˆæ¯”å¦‚ Markdownã€è§£é‡Šã€å‰åç¼€ï¼‰ã€‚
 """.strip()
 
-    # ©¤©¤ AI µ÷ÓÃ ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+    # â”€â”€ AI è°ƒç”¨ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def _call_ai(self, messages: list[dict[str, str]]) -> dict[str, str]:
-        """µ÷ÓÃ´óÄ£ĞÍ¡£Èô JSON Ä£Ê½²»±»¼æÈİ½Ó¿ÚÖ§³Ö£¬Ôò×Ô¶¯½µ¼¶ÖØÊÔÒ»´Î¡£"""
+        """è°ƒç”¨å¤§æ¨¡å‹ã€‚è‹¥ JSON æ¨¡å¼ä¸è¢«å…¼å®¹æ¥å£æ”¯æŒï¼Œåˆ™è‡ªåŠ¨é™çº§é‡è¯•ä¸€æ¬¡ã€‚"""
         if self.client is None:
             return {
                 "emotion": "SLEEPY",
-                "content": "´ô´ô±¦±¦£¬ÎÒÏÖÔÚ»¹Ã»ÅäÖÃ DEEPSEEK_API_KEY£¬ÆÕÍ¨ÁÄÌìÏÈ¿ª²»ÁË£»µ«ÎÊÊ±¼äºÍÌìÆøÎÒÄÜÖ±½Ó´ğ¡£",
+                "content": "å‘†å‘†å®å®ï¼Œæˆ‘ç°åœ¨è¿˜æ²¡é…ç½® DEEPSEEK_API_KEYï¼Œæ™®é€šèŠå¤©å…ˆå¼€ä¸äº†ï¼›ä½†é—®æ—¶é—´å’Œå¤©æ°”æˆ‘èƒ½ç›´æ¥ç­”ã€‚",
             }
 
         request_args = {
@@ -149,24 +149,28 @@ class AIWorker(QThread):
                 response_format={"type": "json_object"},
             )
         except Exception as first_error:
-            # ÓĞĞ© OpenAI ¼æÈİ½Ó¿Ú²»Ö§³Ö response_format£¬´ËÊ±È¥µô¸Ã²ÎÊıÖØÊÔÒ»´Î
+            # æœ‰äº› OpenAI å…¼å®¹æ¥å£ä¸æ”¯æŒ response_formatï¼Œæ­¤æ—¶å»æ‰è¯¥å‚æ•°é‡è¯•ä¸€æ¬¡
             err_text = str(first_error).lower()
             if "response_format" not in err_text and "json" not in err_text:
                 raise
             completion = self.client.chat.completions.create(**request_args)
 
         text = completion.choices[0].message.content or "{}"
-        # Èç¹ûÄ£ĞÍ·µ»ØµÄÄÚÈİ¼¸ºõÊÇ¿ÕµÄ£¨¿ÕµÄ Markdown ´úÂë¿éµÈ£©£¬È¥µô response_format ÖØÊÔ
+        # å¦‚æœæ¨¡å‹è¿”å›çš„å†…å®¹å‡ ä¹æ˜¯ç©ºçš„ï¼ˆç©ºçš„ Markdown ä»£ç å—ç­‰ï¼‰ï¼Œå»æ‰ response_format é‡è¯•
+        if not text.strip() or len(text.strip()) < 10:
+            completion = self.client.chat.completions.create(**request_args)
+            text = completion.choices[0].message.content or "{}"
+        # æ¨¡å‹å¶å°”è¿”å›ç©º JSON ä»£ç å—ï¼Œå»æ‰ response_format é‡è¯•
         if not text.strip() or len(text.strip()) < 10:
             completion = self.client.chat.completions.create(**request_args)
             text = completion.choices[0].message.content or "{}"
         return self._normalize_reply(self._parse_json(text))
 
-    # ©¤©¤ JSON ½âÎö ©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤©¤
+    # â”€â”€ JSON è§£æ â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @staticmethod
     def _parse_json(text: str) -> dict[str, Any]:
-        """½âÎöÄ£ĞÍ·µ»Ø£»¼´Ê¹Ä£ĞÍ°üÁË Markdown ´úÂë¿é£¬Ò²¾¡Á¿ÌáÈ¡ JSON¡£"""
+        """è§£ææ¨¡å‹è¿”å›ï¼›å³ä½¿æ¨¡å‹åŒ…äº† Markdown ä»£ç å—ï¼Œä¹Ÿå°½é‡æå– JSONã€‚"""
         cleaned = (text or "").strip()
         cleaned = re.sub(
             r"^```(?:json)?\s*|\s*```$",
@@ -175,21 +179,21 @@ class AIWorker(QThread):
             flags=re.IGNORECASE | re.DOTALL,
         ).strip()
         if not cleaned:
-            return {"emotion": "NEUTRAL", "content": "´ô´ô±¦±¦£¬ÎÒ¸Õ¸ÕÃ»×éÖ¯ºÃÓïÑÔ£¬ÔÙÎÊÎÒÒ»´Î¡£"}
+            return {"emotion": "NEUTRAL", "content": "å‘†å‘†å®å®ï¼Œæˆ‘åˆšåˆšæ²¡ç»„ç»‡å¥½è¯­è¨€ï¼Œå†é—®æˆ‘ä¸€æ¬¡ã€‚"}
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError:
             match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
             if not match:
-                return {"emotion": "NEUTRAL", "content": "´ô´ô±¦±¦£¬ÎÒ¸Õ¸ÕÃ»×éÖ¯ºÃÓïÑÔ£¬ÔÙÎÊÎÒÒ»´Î¡£"}
+                return {"emotion": "NEUTRAL", "content": "å‘†å‘†å®å®ï¼Œæˆ‘åˆšåˆšæ²¡ç»„ç»‡å¥½è¯­è¨€ï¼Œå†é—®æˆ‘ä¸€æ¬¡ã€‚"}
             data = json.loads(match.group(0))
         if not isinstance(data, dict):
-            raise ValueError("Ä£ĞÍ·µ»ØµÄ JSON ²»ÊÇ¶ÔÏó")
+            raise ValueError("æ¨¡å‹è¿”å›çš„ JSON ä¸æ˜¯å¯¹è±¡")
         return data
 
     @staticmethod
     def _normalize_reply(data: dict[str, Any]) -> dict[str, str]:
-        """Í³Ò»Ğ£ÑéÄ£ĞÍ»Ø¸´£¬·ÀÖ¹ÇéĞ÷±êÇ©»òÕıÎÄÈ±Ê§µ¼ÖÂ½çÃæ±¨´í¡£"""
+        """ç»Ÿä¸€æ ¡éªŒæ¨¡å‹å›å¤ï¼Œé˜²æ­¢æƒ…ç»ªæ ‡ç­¾æˆ–æ­£æ–‡ç¼ºå¤±å¯¼è‡´ç•Œé¢æŠ¥é”™ã€‚"""
         raw_emotion = str(data.get("emotion", "NEUTRAL")).strip()
         emotion = EMOTION_ALIASES.get(
             raw_emotion,
@@ -200,5 +204,5 @@ class AIWorker(QThread):
 
         content = str(data.get("content", "")).strip()
         if not content:
-            content = "´ô´ô±¦±¦£¬ÎÒ¸Õ¸ÕÃ»×éÖ¯ºÃÓïÑÔ£¬ÔÙÎÊÎÒÒ»´Î¡£"
+            content = "å‘†å‘†å®å®ï¼Œæˆ‘åˆšåˆšæ²¡ç»„ç»‡å¥½è¯­è¨€ï¼Œå†é—®æˆ‘ä¸€æ¬¡ã€‚"
         return {"emotion": emotion, "content": content}
