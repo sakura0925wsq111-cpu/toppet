@@ -1,0 +1,26 @@
+﻿# ============================================================
+# 老勺子 (Laoshaozi) - 桌面 AI 宠物 依赖清单
+# ============================================================
+# 安装方式: pip install -r requirements.txt
+
+# --- 核心依赖 ---
+PyQt6>=6.5.0              # 桌面 GUI 框架（无边框窗口、图片渲染）
+openai>=1.0.0             # OpenAI 兼容 API 客户端（调用 DeepSeek 等模型）
+requests>=2.28.0          # HTTP 请求（天气查询等）
+
+# --- 语音输入 ASR ---
+pyaudio>=0.2.13           # 麦克风音频捕获（按住说话录音）
+faster-whisper>=1.1.0     # 本地语音识别（CTranslate2 加速 Whisper）
+
+# --- 语音输出 TTS ---
+edge-tts>=6.1.0           # 微软 Edge 免费 TTS（中文自然度高）
+pygame>=2.5.0             # 异步音频播放器（pygame.mixer）
+
+# --- 未来可选语音引擎（暂不安装）---
+# GPT-SoVITS >= 本地部署    # 高音质声音克隆
+# CosyVoice >= 本地部署      # 阿里情感语音合成
+# FishSpeech >= 本地部署     # 多语言语音合成
+
+# --- 未来硬件扩展（可选）---
+# RPi.GPIO>=0.7.1         # 树莓派 GPIO 控制（实体按钮/LED）
+# adafruit-circuitpython-ssd1306  # OLED 小屏幕驱动

@@ -1,0 +1,2 @@
+assets/whisper_models/**/*.bin filter=lfs diff=lfs merge=lfs -text
+assets/whisper_models/**/*.onnx filter=lfs diff=lfs merge=lfs -text
