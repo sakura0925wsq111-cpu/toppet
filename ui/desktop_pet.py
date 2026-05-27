@@ -46,7 +46,8 @@ from emotion_scheduler import (
 from ui.ai_worker import AIWorker
 
 # ── 语音模块 ──
-from audio import TTSManager, ASRManager
+from audio import TTSManager, ASRManager, SoVITSTTSEngine
+from systems.tts_service_manager import TTSServiceManager
 
 
 # =============================================================================
@@ -103,6 +104,13 @@ class DesktopPet(QWidget):
 
         # ── 语音管理器（TTS + ASR）──
         self.tts_manager = TTSManager()
+
+        # -- TTS service lifecycle (auto-start GPT-SoVITS API) --
+        self.tts_service = TTSServiceManager()
+        self.tts_service.service_ready.connect(self._on_tts_service_ready)
+        self.tts_service.service_failed.connect(self._on_tts_service_failed)
+        self.tts_service.status_update.connect(self._on_tts_service_status)
+        # self.tts_service.start_service() called after UI setup below
         self.asr_manager = ASRManager()
         self._connect_voice_signals()
 
@@ -112,6 +120,9 @@ class DesktopPet(QWidget):
         # ── 初始化 UI ──
         self._setup_ui()
         self._load_images()
+
+        # -- Start TTS service after UI is ready --
+        self.tts_service.start_service()
 
         # ── 启动默认表情 ──
         self.apply_emotion_decision(
@@ -125,6 +136,54 @@ class DesktopPet(QWidget):
         self.idle_timer.setInterval(1_000)
         self.idle_timer.timeout.connect(self._on_idle_tick)
         self.idle_timer.start()
+
+    # TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
+    # TTS Service lifecycle callbacks
+    # TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
+
+    def _on_tts_service_ready(self):
+        """GPT-SoVITS API is online, switch TTS engine."""
+        import time as _time
+        print("[DesktopPet] GPT-SoVITS API ready, switching TTS engine...")
+        ref_wav = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ref_normal.wav")
+        sovits = SoVITSTTSEngine(
+            api_url="http://127.0.0.1:9880",
+            gpt_model_path="GPT_weights_v2Pro/吴绍强-e15.ckpt",
+            sovits_model_path="SoVITS_weights_v2pro/吴绍强_e8_s160.pth",
+            ref_audio_path=ref_wav,
+        )
+        switched = False
+        for attempt in range(3):
+            try:
+                if sovits.set_model():
+                    self.tts_manager.set_engine(sovits)
+                    print("[DesktopPet] Switched to local GPT-SoVITS voice!")
+                    switched = True
+                    break
+                else:
+                    print(f"[DesktopPet] set_model attempt {attempt+1}/3 failed, retrying...")
+                    _time.sleep(2)
+            except Exception as exc:
+                print(f"[DesktopPet] set_model attempt {attempt+1}/3 error: {exc}")
+                _time.sleep(2)
+        if not switched:
+            print("[DesktopPet] GPT-SoVITS model switch failed after 3 retries, keeping EdgeTTS")
+
+    def _on_tts_service_failed(self, msg):
+        """GPT-SoVITS API startup failed, show error in chat."""
+        print(f"[DesktopPet] TTS service failed: {msg}")
+        pass  # startup failed
+
+    def _on_tts_service_status(self, msg):
+        """Status update during GPT-SoVITS startup."""
+        print(f"[DesktopPet] TTS status: {msg}")
+        pass  # status update logged to console
+
+    def closeEvent(self, event):
+        """Shutdown: stop GPT-SoVITS subprocess before exit."""
+        if hasattr(self, "tts_service"):
+            self.tts_service.stop_service()
+        super().closeEvent(event)
 
     # ═══════════════════════════════════════════════════════════════════
     # 语音信号连接

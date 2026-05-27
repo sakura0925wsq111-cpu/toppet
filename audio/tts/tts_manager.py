@@ -78,7 +78,7 @@ class TTSWorker(QThread):
                 return
 
             # ── 步骤2：写入临时文件（pygame 需要文件路径）──
-            temp_fd, temp_path = tempfile.mkstemp(suffix=".mp3")
+            temp_fd, temp_path = tempfile.mkstemp(suffix=f".{self._engine.audio_format}")
             try:
                 os.write(temp_fd, audio_bytes)
                 os.close(temp_fd)

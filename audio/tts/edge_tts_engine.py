@@ -73,6 +73,10 @@ class EdgeTTSEngine(TTSEngine):
     def voice_id(self) -> str:
         return self._voice
 
+    @property
+    def audio_format(self) -> str:
+        return "mp3"
+
     def synthesize(self, text: str) -> bytes:
         """将文字合成为 MP3 音频。
 

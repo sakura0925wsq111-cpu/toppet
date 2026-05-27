@@ -14,6 +14,8 @@ DesktopPet 只需 import 本模块即可使用全部语音能力。
 
 # ── TTS ──
 from .tts import (
+    SoVITSTTSEngine,
+    create_sovits_tts,
     TTSEngine,
     EdgeTTSEngine,
     EDGE_VOICES,
@@ -41,6 +43,8 @@ __all__ = [
     "EdgeTTSEngine",
     "EDGE_VOICES",
     "create_edge_tts",
+    "SoVITSTTSEngine",
+    "create_sovits_tts",
     "TTSManager",
     "TTSWorker",
     # ASR

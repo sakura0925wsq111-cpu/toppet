@@ -53,3 +53,8 @@ class TTSEngine(ABC):
     def voice_id(self) -> str:
         """返回当前使用的声音 ID（子类可覆盖）。"""
         return "default"
+
+    @property
+    def audio_format(self) -> str:
+        """返回音频格式后缀（如 wav, mp3）。"""
+        return "wav"

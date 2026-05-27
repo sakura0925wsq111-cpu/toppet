@@ -4,6 +4,7 @@
 from .state_machine import PetState, StateMachine, can_transition, can_interrupt, STATE_PRIORITY
 from .idle_scheduler import IdleAction, IdleScheduler, IDLE_ACTION_POOL, INACTIVITY_TRIGGERS
 from .expression_manager import ExpressionManager, EmotionMatcher
+from .tts_service_manager import TTSServiceManager
 
 __all__ = [
     "PetState",
@@ -17,4 +18,5 @@ __all__ = [
     "INACTIVITY_TRIGGERS",
     "ExpressionManager",
     "EmotionMatcher",
+    "TTSServiceManager",
 ]

@@ -46,6 +46,7 @@ from core.pet_brain import PetBrain
 from ui.desktop_pet import DesktopPet
 
 
+
 def main() -> None:
     """启动老勺子桌面宠物。"""
     app = QApplication(sys.argv)
@@ -59,6 +60,9 @@ def main() -> None:
     # ── 创建桌面宠物（UI 层，负责显示和交互）──
     pet = DesktopPet(config, brain)
     pet.show()
+
+    # ── 尝试切换到本地 GPT-SoVITS 声音 ──
+    app.aboutToQuit.connect(lambda: pet.tts_service.stop_service())
 
     # ── 运行事件循环 ──
     try:
