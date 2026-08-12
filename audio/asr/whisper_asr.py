@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import os
 
+from common.paths import WHISPER_MODELS_DIR
+
 from .base_asr import ASREngine
 
 
@@ -43,10 +45,7 @@ class FasterWhisperEngine(ASREngine):
     """
 
     # Whisper 模型缓存目录（放在 assets 下，不污染项目根目录）
-    DEFAULT_MODEL_DIR = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "assets", "whisper_models"
-    )
+    DEFAULT_MODEL_DIR = os.fspath(WHISPER_MODELS_DIR)
 
     def __init__(
         self,

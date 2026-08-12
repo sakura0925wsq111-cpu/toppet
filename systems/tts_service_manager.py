@@ -5,6 +5,8 @@ import logging, os, subprocess, sys, time, threading
 import requests
 from PyQt6.QtCore import QThread, pyqtSignal, QObject
 
+from common.paths import LOGS_DIR
+
 DEFAULT_SOVITS_DIR = os.path.normpath(r"D:\GPT-SoVITS-v2pro-20250604\GPT-SoVITS-v2pro-20250604")
 DEFAULT_RUNTIME_PYTHON = os.path.join(DEFAULT_SOVITS_DIR, "runtime", "python.exe")
 DEFAULT_API_SCRIPT = os.path.join(DEFAULT_SOVITS_DIR, "api_v2.py")
@@ -13,7 +15,7 @@ MAX_WAIT_SECONDS = 60
 POLL_INTERVAL = 1.5
 MAX_RETRY_COUNT = 2
 RETRY_BACKOFF_BASE = 10.0
-LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+LOG_DIR = os.fspath(LOGS_DIR)
 
 
 def _setup_service_logger(log_dir):
@@ -259,6 +261,14 @@ class TTSServiceManager(QObject):
         self.sovits_model_rel = "SoVITS_weights_v2pro/吴绍强_e8_s160.pth"
 
     # -- Public API --
+
+    @property
+    def runtime_available(self):
+        """Whether the configured local GPT-SoVITS runtime can be started."""
+        return (
+            os.path.isfile(self._runtime_python)
+            and os.path.isfile(self._api_script)
+        )
 
     def start_service(self):
         if self._worker is not None and self._worker.isRunning():

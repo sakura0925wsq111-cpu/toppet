@@ -17,7 +17,7 @@
         ai_worker.py       后台线程包装
     audio/                 ← 语音扩展（预留，未实现）
     systems/               ← 状态机、空闲调度、表情管理
-    emotion_scheduler.py   ← 情绪调度器（兼容封装）
+        emotion_scheduler.py   情绪调度器
 
 依赖：
     pip install -r requirements.txt
@@ -46,23 +46,35 @@ from core.pet_brain import PetBrain
 from ui.desktop_pet import DesktopPet
 
 
+LAOSHAOZI_MODE = "personal"
+
+
+def create_laoshaozi(
+    config: PetConfig | None = None,
+    start_background_services: bool = True,
+) -> tuple[PetBrain, DesktopPet]:
+    """Build a standalone Laoshaozi brain and window."""
+    config = config or PetConfig()
+    brain = PetBrain(config, character=LAOSHAOZI_MODE)
+    pet = DesktopPet(
+        config,
+        brain,
+        mode_id=LAOSHAOZI_MODE,
+        start_background_services=start_background_services,
+    )
+    return brain, pet
+
 
 def main() -> None:
-    """启动老勺子桌面宠物。"""
+    """启动独立的老勺子桌面宠物模式。"""
     app = QApplication(sys.argv)
 
-    # ── 创建配置 ──
-    config = PetConfig()
-
-    # ── 创建大脑（纯逻辑层，与 UI 无关）──
-    brain = PetBrain(config)
-
-    # ── 创建桌面宠物（UI 层，负责显示和交互）──
-    pet = DesktopPet(config, brain)
+    # ── 创建固定为 personal 的老勺子大脑与窗口 ──
+    _brain, pet = create_laoshaozi()
     pet.show()
 
-    # ── 尝试切换到本地 GPT-SoVITS 声音 ──
-    app.aboutToQuit.connect(lambda: pet.tts_service.stop_service())
+    # ── 退出时关闭本地 VoxCPM2 声音服务 ──
+    app.aboutToQuit.connect(pet.shutdown_services)
 
     # ── 运行事件循环 ──
     try:

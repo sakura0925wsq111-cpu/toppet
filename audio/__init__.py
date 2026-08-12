@@ -22,6 +22,8 @@ from .tts import (
     create_edge_tts,
     TTSManager,
     TTSWorker,
+    VoxCPMTTSEngine,
+    FallbackTTSEngine,
 )
 
 # ── ASR ──
@@ -47,6 +49,8 @@ __all__ = [
     "create_sovits_tts",
     "TTSManager",
     "TTSWorker",
+    "VoxCPMTTSEngine",
+    "FallbackTTSEngine",
     # ASR
     "ASREngine",
     "FasterWhisperEngine",

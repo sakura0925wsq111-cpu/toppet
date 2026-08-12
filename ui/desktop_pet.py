@@ -18,10 +18,12 @@ DesktopPet —— 桌面宠物主窗口（纯 UI 层）
 from __future__ import annotations
 
 import os
+import logging
 import re
+import time
 
 from PyQt6.QtCore import QTimer, Qt, pyqtSignal
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtGui import QMovie, QPixmap
 from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
@@ -33,10 +35,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from core.config import PetConfig, api_key_help_text, ASSETS_DIR
+from core.config import PetConfig, api_key_help_text
 from core.pet_brain import PetBrain
 
-from emotion_scheduler import (
+from systems.emotion_scheduler import (
     EMOTION_ALIASES,
     EMOTION_ASSETS,
     EmotionDecision,
@@ -46,9 +48,17 @@ from emotion_scheduler import (
 from ui.ai_worker import AIWorker
 
 # ── 语音模块 ──
-from audio import TTSManager, ASRManager, SoVITSTTSEngine
-from systems.tts_service_manager import TTSServiceManager
+from audio import (
+    ASRManager,
+    EDGE_VOICES,
+    EdgeTTSEngine,
+    FallbackTTSEngine,
+    TTSManager,
+    VoxCPMTTSEngine,
+)
+from systems.voxcpm_service_manager import VoxCPMServiceManager
 
+logger = logging.getLogger(__name__)
 
 # =============================================================================
 # 交互状态文字
@@ -75,11 +85,25 @@ class DesktopPet(QWidget):
     AI 回复自动通过 TTS 朗读。
     """
 
-    def __init__(self, config: PetConfig, brain: PetBrain):
+    def __init__(
+        self,
+        config: PetConfig,
+        brain: PetBrain,
+        mode_id: str = "personal",
+        start_background_services: bool = True,
+    ):
         super().__init__()
         self.config = config
         self.brain = brain
+        self.mode_id = mode_id
+        self._start_background_services = start_background_services
         self.drag_offset = None
+
+        # A DesktopPet instance represents exactly one mode. The UI shares the
+        # brain's manager so persona, memory, assets and voice cannot drift.
+        self.brain.current_character = mode_id
+        self.character_manager = self.brain.character_manager
+        self.mode_profile = self.character_manager.get_profile(mode_id)
 
         # ── 检查 API Key ──
         if not self.config.api_key:
@@ -90,39 +114,53 @@ class DesktopPet(QWidget):
             )
 
         # ── 图片缓存 ──
+        self.movies: dict[str, QMovie] = {}
         self.pixmaps: dict[str, QPixmap] = {}
+        self.current_movie: QMovie | None = None
+        self._character_expressions: dict[str, set[str]] = {}
 
         # ── 情绪调度器 ──
         self.emotion_scheduler = PetEmotionScheduler()
+
         self.emotion_return_token = 0
         self.is_ai_busy = False
         self.is_tts_playing = False   # TTS
-        self._tts_pending = False    # TTS ??????????
+        self._tts_pending = False     # 已提交合成、等待开始播放
         self._tts_emotion = "NEUTRAL"    # 缓存 AI 情感，TTS 播放时切表情
         self._tts_text = ""              # 缓存 AI 回复文字，与语音同步显示
+        self._voxcpm_ready = False
         self.interaction_state = "idle"
+        self.worker: AIWorker | None = None
+        self._stream_session_counter = 0
+        self._active_stream_session: int | None = None
+        self._stream_text = ""
+        self._stream_display_dirty = False
+        self._stream_tts_started = False
+        self._queued_tts_text = ""
+        self._request_started_at = 0.0
 
         # ── 语音管理器（TTS + ASR）──
         self.tts_manager = TTSManager()
+        self._configure_tts_for_mode()
 
-        # -- TTS service lifecycle (auto-start GPT-SoVITS API) --
-        self.tts_service = TTSServiceManager()
-        self.tts_service.service_ready.connect(self._on_tts_service_ready)
-        self.tts_service.service_failed.connect(self._on_tts_service_failed)
-        self.tts_service.status_update.connect(self._on_tts_service_status)
-        # self.tts_service.start_service() called after UI setup below
+        # The cloned voice loads asynchronously; EdgeTTS is usable immediately.
+        self.tts_service: VoxCPMServiceManager | None = None
         self.asr_manager = ASRManager()
         self._connect_voice_signals()
 
-        # ????? ASR ?????????????????
-        self.asr_manager.preload()
+        if self._start_background_services:
+            self.asr_manager.preload()
 
         # ── 初始化 UI ──
         self._setup_ui()
         self._load_images()
 
-        # -- Start TTS service after UI is ready --
-        self.tts_service.start_service()
+        self._stream_display_timer = QTimer(self)
+        self._stream_display_timer.setInterval(40)
+        self._stream_display_timer.timeout.connect(self._flush_stream_display)
+
+        if self._start_background_services:
+            self._start_optional_tts_service()
 
         # ── 启动默认表情 ──
         self.apply_emotion_decision(
@@ -142,47 +180,52 @@ class DesktopPet(QWidget):
     # TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
 
     def _on_tts_service_ready(self):
-        """GPT-SoVITS API is online, switch TTS engine."""
-        import time as _time
-        print("[DesktopPet] GPT-SoVITS API ready, switching TTS engine...")
-        ref_wav = os.path.join(os.path.dirname(os.path.dirname(__file__)), "ref_normal.wav")
-        sovits = SoVITSTTSEngine(
-            api_url="http://127.0.0.1:9880",
-            gpt_model_path="GPT_weights_v2Pro/吴绍强-e15.ckpt",
-            sovits_model_path="SoVITS_weights_v2pro/吴绍强_e8_s160.pth",
-            ref_audio_path=ref_wav,
-        )
-        switched = False
-        for attempt in range(3):
-            try:
-                if sovits.set_model():
-                    self.tts_manager.set_engine(sovits)
-                    print("[DesktopPet] Switched to local GPT-SoVITS voice!")
-                    switched = True
-                    break
-                else:
-                    print(f"[DesktopPet] set_model attempt {attempt+1}/3 failed, retrying...")
-                    _time.sleep(2)
-            except Exception as exc:
-                print(f"[DesktopPet] set_model attempt {attempt+1}/3 error: {exc}")
-                _time.sleep(2)
-        if not switched:
-            print("[DesktopPet] GPT-SoVITS model switch failed after 3 retries, keeping EdgeTTS")
+        """Mark VoxCPM2 ready; the primary/fallback chain is already active."""
+        self._voxcpm_ready = True
+        print("[DesktopPet] VoxCPM2 cloned voice ready; EdgeTTS remains fallback only")
 
     def _on_tts_service_failed(self, msg):
-        """GPT-SoVITS API startup failed, show error in chat."""
-        print(f"[DesktopPet] TTS service failed: {msg}")
-        pass  # startup failed
+        """The preconfigured chain will use EdgeTTS while VoxCPM2 is down."""
+        print(f"[DesktopPet] VoxCPM2 unavailable; EdgeTTS fallback active: {msg}")
 
     def _on_tts_service_status(self, msg):
-        """Status update during GPT-SoVITS startup."""
-        print(f"[DesktopPet] TTS status: {msg}")
-        pass  # status update logged to console
+        """Report background model loading without blocking the UI."""
+        print(f"[DesktopPet] VoxCPM2 status: {msg}")
+
+    def _start_optional_tts_service(self) -> None:
+        """Start VoxCPM2 only for the personal/Laoshaozi profile."""
+        tts_config = self.mode_profile.get("tts", {})
+        if tts_config.get("engine") != "voxcpm" or not tts_config.get(
+            "optional_voxcpm", False
+        ):
+            return
+
+        service = VoxCPMServiceManager(
+            api_url=tts_config.get("api_url", "http://127.0.0.1:9890"),
+            inference_steps=int(tts_config.get("inference_steps", 4)),
+        )
+        service.service_ready.connect(self._on_tts_service_ready)
+        service.service_failed.connect(self._on_tts_service_failed)
+        service.status_update.connect(self._on_tts_service_status)
+        self.tts_service = service
+
+        service.start_service()
+
+    def shutdown_services(self) -> None:
+        """Stop background audio work. Safe to call more than once."""
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel_request()
+            self.worker.wait(500)
+        self._stream_display_timer.stop()
+        self.tts_manager.shutdown()
+        self.asr_manager.cancel()
+        self.brain.close(wait=False)
+        if self.tts_service is not None:
+            self.tts_service.stop_service()
 
     def closeEvent(self, event):
-        """Shutdown: stop GPT-SoVITS subprocess before exit."""
-        if hasattr(self, "tts_service"):
-            self.tts_service.stop_service()
+        """Shutdown background services before closing the window."""
+        self.shutdown_services()
         super().closeEvent(event)
 
     # ═══════════════════════════════════════════════════════════════════
@@ -241,7 +284,10 @@ class DesktopPet(QWidget):
         self.pet_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         # ── 对话输出气泡 ──
-        self.chat_output = QLabel("呆呆宝宝，找我啥事？")
+        ui_config = self.mode_profile.get("ui", {})
+        display_name = self.character_manager.get_display_name()
+        greeting = ui_config.get("greeting", f"你好，我是{display_name}。")
+        self.chat_output = QLabel(greeting)
         self.chat_output.setWordWrap(True)
         self.chat_output.setStyleSheet(
             """
@@ -257,7 +303,9 @@ class DesktopPet(QWidget):
 
         # ── 对话输入框 ──
         self.chat_input = QLineEdit()
-        self.chat_input.setPlaceholderText("和老勺子说点啥…")
+        self.chat_input.setPlaceholderText(
+            ui_config.get("input_placeholder", f"和{display_name}说点什么…")
+        )
         self.chat_input.setStyleSheet(
             """
             QLineEdit {
@@ -307,32 +355,106 @@ class DesktopPet(QWidget):
     # ═══════════════════════════════════════════════════════════════════
 
     def _load_images(self) -> None:
-        """加载桌宠表情图片。"""
-        missing: list[str] = []
-        for emo in EMOTION_ASSETS:
-            pixmap = QPixmap()
-            for suffix in (".png", ".jpg", ".jpeg"):
-                image_path = os.path.join(ASSETS_DIR, f"{emo}{suffix}")
-                candidate = QPixmap(image_path)
-                if not candidate.isNull():
-                    pixmap = candidate
-                    break
+        """Load expression images for this instance's fixed mode only.
 
-            self.pixmaps[emo] = pixmap
-            if pixmap.isNull():
-                missing.append(f"{emo}.png/.jpg")
+        Asset structure:
+            assets/
+            +-- personal/
+            |   +-- NEUTRAL.gif / NEUTRAL.png
+            |   +-- HAPPY.gif   / HAPPY.png
+            |   +-- ...
+        Cache key format: "character/EXPRESSION" (e.g. "personal/HAPPY").
+        """
+        self.movies.clear()
+        self.pixmaps.clear()
+        self._character_expressions.clear()
+        missing: list[str] = []
+
+        active_mode = self.character_manager.current_character
+        for char_id in (active_mode,):
+            char_dir = self.character_manager.get_character_asset_dir(char_id)
+            if not os.path.isdir(char_dir):
+                continue
+
+            self._character_expressions.setdefault(char_id, set())
+            seen: set[str] = set()
+
+            for fname in os.listdir(char_dir):
+                name, ext = os.path.splitext(fname)
+                ext_lower = ext.lower()
+                if ext_lower not in (".gif", ".png", ".jpg", ".jpeg"):
+                    continue
+
+                expr_key = name.upper()
+                cache_key = f"{char_id}/{expr_key}"
+
+                if cache_key in seen:
+                    continue  # prefer first found (gif over png)
+                seen.add(cache_key)
+
+                filepath = os.path.join(char_dir, fname)
+                if ext_lower == ".gif":
+                    movie = QMovie(filepath)
+                    if movie.isValid():
+                        movie.setCacheMode(QMovie.CacheMode.CacheAll)
+                        movie.setScaledSize(self.pet_label.size())
+                        self.movies[cache_key] = movie
+                        self._character_expressions[char_id].add(expr_key)
+                else:
+                    pixmap = QPixmap(filepath)
+                    if not pixmap.isNull():
+                        self.pixmaps[cache_key] = pixmap
+                        self._character_expressions[char_id].add(expr_key)
+
+            if "NEUTRAL" not in self._character_expressions.get(char_id, set()):
+                missing.append(f"{char_id}/NEUTRAL")
 
         if missing:
-            self.chat_output.setText("有些表情图片没找到：" + "、".join(missing))
+            self.chat_output.setText("missing: " + ", ".join(missing))
 
     def set_emotion(self, emotion: str) -> None:
-        """根据传来的情感标签切换宠物图片。"""
+        """Switch pet image based on unified emotion key, resolved through character manager.
+
+        Flow:
+            unified emotion (e.g. "HAPPY")
+              -> character_manager.resolve()
+            character expression (e.g. shinchan "HAPPY")
+            -> cache lookup "shinchan/HAPPY"
+            -> display
+
+        Missing asset fallback:
+            character/expression -> character/NEUTRAL
+        """
         raw_emotion = str(emotion).strip()
         emotion = EMOTION_ALIASES.get(
             raw_emotion,
             re.sub(r"[\s-]+", "_", raw_emotion.upper()),
         )
-        pixmap = self.pixmaps.get(emotion) or self.pixmaps.get("NEUTRAL")
+
+        # Resolve through character manager
+        expression = self.character_manager.resolve(emotion)
+        char = self.character_manager.current_character
+
+        # Fallback-aware cache lookup
+        cache_key = self._find_asset_key(char, expression)
+        if cache_key is None:
+            return
+
+        movie = self.movies.get(cache_key)
+        if movie and movie.isValid():
+            if self.current_movie and self.current_movie is not movie:
+                self.current_movie.stop()
+            self.current_movie = movie
+            movie.setScaledSize(self.pet_label.size())
+            self.pet_label.setMovie(movie)
+            movie.start()
+            return
+
+        if self.current_movie:
+            self.current_movie.stop()
+            self.current_movie = None
+
+        pixmap = self.pixmaps.get(cache_key)
         if not pixmap or pixmap.isNull():
             return
 
@@ -342,6 +464,22 @@ class DesktopPet(QWidget):
             Qt.TransformationMode.SmoothTransformation,
         )
         self.pet_label.setPixmap(scaled)
+
+    def _find_asset_key(self, char: str, expression: str) -> str | None:
+        """Find the best available asset key with fallback chain.
+
+        Fallback order:
+            1. {char}/{expression}
+            2. {char}/NEUTRAL
+        """
+        candidates = [
+            f"{char}/{expression}",
+            f"{char}/NEUTRAL",
+        ]
+        for key in candidates:
+            if key in self.movies or key in self.pixmaps:
+                return key
+        return None
 
     def apply_emotion_decision(
         self, decision: EmotionDecision, schedule_return: bool = True
@@ -435,8 +573,8 @@ class DesktopPet(QWidget):
         self.chat_input.setEnabled(False)
         self.voice_button.setEnabled(False)  # ── 思考期间禁用语音按钮
         self.is_ai_busy = True
-        # ??????
-        self.chat_output.setText(f"??{text}")
+        self._request_started_at = time.monotonic()
+        self.chat_output.setText(f"你：{text}")
         self._start_ai_request(text)
 
     def _start_ai_request(self, text: str) -> None:
@@ -450,45 +588,113 @@ class DesktopPet(QWidget):
             schedule_return=False,
         )
 
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel_request()
+        self.tts_manager.cancel_stream()
+        self._stream_session_counter += 1
+        self._active_stream_session = self._stream_session_counter
+        self._stream_text = ""
+        self._stream_display_dirty = False
+        self._stream_tts_started = False
+        self._queued_tts_text = ""
+        self._tts_text = ""
+        self._tts_pending = False
+        self.is_tts_playing = False
+
         self.worker = AIWorker(self.brain, text, self)
+        self.worker.emotion_ready.connect(self._on_stream_emotion)
+        self.worker.text_delta.connect(self._on_stream_text_delta)
+        self.worker.sentence_ready.connect(self._on_stream_sentence)
         self.worker.response_ready.connect(self._on_ai_response)
         self.worker.error_occurred.connect(self._on_ai_error)
         self.worker.start()
+
+    def _is_current_worker_signal(self) -> bool:
+        sender = self.sender()
+        return sender is None or sender is self.worker
+
+    def _on_stream_emotion(self, emotion: str) -> None:
+        if not self._is_current_worker_signal():
+            return
+        self._tts_emotion = emotion or "NEUTRAL"
+
+    def _on_stream_text_delta(self, delta: str) -> None:
+        if not self._is_current_worker_signal() or not delta:
+            return
+        self._stream_text += delta
+        self._tts_text = self._stream_text.strip()
+        self._stream_display_dirty = True
+        if not self._stream_display_timer.isActive():
+            self._stream_display_timer.start()
+
+    def _flush_stream_display(self) -> None:
+        if not self._stream_display_dirty:
+            if not self.is_ai_busy:
+                self._stream_display_timer.stop()
+            return
+        self._stream_display_dirty = False
+        self.chat_output.setText(self._stream_text.strip())
+        if not self.is_ai_busy:
+            self._stream_display_timer.stop()
+
+    def _on_stream_sentence(self, sentence: str) -> None:
+        if not self._is_current_worker_signal() or not sentence.strip():
+            return
+        session_id = self._active_stream_session
+        if session_id is None:
+            return
+        if not self._stream_tts_started:
+            self.tts_manager.begin_stream(session_id)
+            self._stream_tts_started = True
+            self._tts_pending = True
+        if self.tts_manager.enqueue_text(session_id, sentence):
+            self._queued_tts_text += sentence
 
     def _on_ai_response(self, data: dict) -> None:
         """AI 成功返回回复时的处理。
 
         在显示文字后，自动调用 TTS 朗读回复。
         """
-        emotion = data.get("emotion", "NEUTRAL")
+        if not self._is_current_worker_signal():
+            return
+        emotion = data.get("emotion", self._tts_emotion or "NEUTRAL")
         content = data.get("content", "呆呆宝宝，我刚刚脑子短路了，再问我一次～")
-        user_text = getattr(self.worker, "user_text", "")
+        user_text = getattr(self.worker, "user_text", "") if self.worker else ""
 
         # 恢复界面
         self.is_ai_busy = False
+        self._stream_text = content
+        self._tts_text = content
+        self._stream_display_dirty = True
+        self._flush_stream_display()
 
         # 更新表情
         decision = self.emotion_scheduler.on_reply(user_text, content, emotion)
         self.apply_emotion_decision(decision, schedule_return=False)
 
-        # 缓存 AI 回复和情感，等 TTS 播放时再同步显示（文字语音同时出现）
-        self._tts_emotion = decision.emotion  # ????????
-        self._tts_text = content
-        # ????????? TTS????????
-        self.chat_output.setText(content)
+        self._tts_emotion = decision.emotion
 
         # 恢复输入（语音按钮在 TTS 播放结束后恢复）
         self.chat_input.setEnabled(True)
         self.chat_input.setFocus()
-        self._set_interaction_state("idle")
-
-        # ── 🎵 新增：自动朗读 AI 回复 ──
-        self._tts_pending = True
-        self.tts_manager.speak(content)
+        if self._stream_tts_started and self._active_stream_session is not None:
+            self.tts_manager.end_stream(self._active_stream_session)
+            if not self.is_tts_playing:
+                self._set_interaction_state("thinking")
+        else:
+            # Defensive fallback for an unusual empty/malformed stream.
+            self._set_interaction_state("idle")
+            self.voice_button.setEnabled(True)
 
     def _on_ai_error(self, err: str) -> None:
         """AI 处理失败时的兜底处理。"""
+        if not self._is_current_worker_signal():
+            return
         self.is_ai_busy = False
+        if self._active_stream_session is not None:
+            self.tts_manager.cancel_stream(self._active_stream_session)
+        self._active_stream_session = None
+        self._stream_tts_started = False
         self.apply_emotion_decision(self.emotion_scheduler.on_error())
         self.chat_output.setText("人机，我这边处理失败了：" + err[:80])
         self.chat_input.setEnabled(True)
@@ -568,6 +774,11 @@ class DesktopPet(QWidget):
     def _on_tts_started(self) -> None:
         """TTS 开始播放 → 切 TALKING 表情。"""
         self.is_tts_playing = True
+        if self._request_started_at:
+            logger.info(
+                "voice_latency asr_text_to_first_playback=%.3fs",
+                time.monotonic() - self._request_started_at,
+            )
         self._tts_pending = False
         self._set_interaction_state("talking")
         # 使用 AI 返回的情感标签，不再硬编码 LISTENING
@@ -579,6 +790,8 @@ class DesktopPet(QWidget):
         """TTS 播放结束 → 恢复 idle。"""
         self.is_tts_playing = False
         self._tts_pending = False
+        self._active_stream_session = None
+        self._stream_tts_started = False
         self.voice_button.setEnabled(True)
         self._set_interaction_state("idle")
         decision = self.emotion_scheduler.default_decision(
@@ -590,6 +803,8 @@ class DesktopPet(QWidget):
         """TTS 播放出错 → 静默恢复 idle。"""
         self.is_tts_playing = False
         self._tts_pending = False
+        self._active_stream_session = None
+        self._stream_tts_started = False
         self.voice_button.setEnabled(True)
         self._set_interaction_state("idle")
         # TTS ?????????????
@@ -629,9 +844,38 @@ class DesktopPet(QWidget):
         self._show_context_menu(event.globalPos())
 
     def _show_context_menu(self, pos) -> None:
-        """显示右键菜单（退出）。"""
+        """Show the fixed mode name and quit action."""
         menu = QMenu(self)
-        quit_action = menu.addAction("退出老勺子")
+        mode_action = menu.addAction(self.character_manager.get_display_name())
+        mode_action.setEnabled(False)
+        menu.addSeparator()
+        quit_action = menu.addAction("退出")
         chosen = menu.exec(pos)
         if chosen == quit_action:
             QApplication.quit()
+
+    def _configure_tts_for_mode(self) -> None:
+        """Configure VoxCPM2 as primary and EdgeTTS strictly as fallback."""
+        profile = self.mode_profile
+        tts_config = profile.get("tts", {})
+        voice_key = tts_config.get(
+            "fallback_voice", tts_config.get("voice", "yunxi")
+        )
+        voice_id = EDGE_VOICES.get(voice_key, voice_key)
+        edge_fallback = EdgeTTSEngine(voice=voice_id)
+        if tts_config.get("engine") == "voxcpm":
+            primary = VoxCPMTTSEngine(
+                api_url=tts_config.get("api_url", "http://127.0.0.1:9890"),
+                inference_steps=int(tts_config.get("inference_steps", 4)),
+                timeout=float(tts_config.get("timeout_seconds", 120)),
+            )
+            self.tts_manager.set_engine(
+                FallbackTTSEngine(primary, edge_fallback)
+            )
+            print(
+                f"[DesktopPet] TTS primary: VoxCPM2; fallback: {voice_id} "
+                f"for {self.mode_id}"
+            )
+            return
+        self.tts_manager.set_engine(edge_fallback)
+        print(f"[DesktopPet] TTS: {voice_id} for {self.mode_id}")

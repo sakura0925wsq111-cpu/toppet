@@ -9,7 +9,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from emotion_scheduler import EMOTION_PROFILES, PetEmotionScheduler  # noqa: E402
+from systems.emotion_scheduler import (  # noqa: E402
+    EMOTION_PROFILES,
+    PetEmotionScheduler,
+)
 
 
 class EmotionSchedulerTests(unittest.TestCase):

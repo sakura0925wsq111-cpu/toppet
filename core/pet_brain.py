@@ -18,12 +18,24 @@ UI 层不需要关心内部如何调度、如何拼接 prompt、如何管理记�
 
 from __future__ import annotations
 
+import logging
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Callable
+
+from common.paths import LOGS_DIR
+
 from .config import PetConfig
 from .conversation import ConversationHistory
 from .client import AIClient, AIReply
+from .long_term_memory import LongTermMemory
 
 # 延迟导入，避免循环依赖
-from emotion_scheduler import EMOTION_PROMPT
+from systems.emotion_scheduler import EMOTION_PROMPT
+from systems.character_manager import CharacterManager, DEFAULT_CHARACTER
+
+logger = logging.getLogger(__name__)
 
 
 class PetBrain:
@@ -40,11 +52,16 @@ class PetBrain:
         print(reply.content)  # "呆呆宝宝，上海现在晴天，22°C..."
     """
 
-    def __init__(self, config: PetConfig | None = None):
+    def __init__(
+        self,
+        config: PetConfig | None = None,
+        character: str = DEFAULT_CHARACTER,
+    ):
         """初始化大脑。
 
         Args:
             config: 宠物配置。如果为 None，使用默认配置。
+            character: 固定运行的人物模式。老勺子入口始终传入 personal。
         """
         if config is None:
             config = PetConfig()
@@ -64,27 +81,81 @@ class PetBrain:
             max_rounds=config.max_conversation_rounds,
         )
 
+        # ── 固定人物模式与独立长期记忆 ──
+        self._char_manager = CharacterManager(current_character=character)
+        self._current_character = character
+        self._memories: dict[str, LongTermMemory] = {}
+        self._get_or_create_memory(character)
+        self._memory_executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="long-term-memory",
+        )
+        self._closed = False
+
         # ── 默认城市 ──
         self.default_city = config.default_city
+
 
     # ═══════════════════════════════════════════════════════════════════
     # 性格设定（System Prompt）
     # ═══════════════════════════════════════════════════════════════════
 
     @property
+    def current_character(self) -> str:
+        return self._current_character
+
+    @property
+    def character_manager(self) -> CharacterManager:
+        """Return the manager shared with the UI for this running mode."""
+        return self._char_manager
+
+    @current_character.setter
+    def current_character(self, char_id: str) -> None:
+        if char_id == self._current_character:
+            return
+        if not self._char_manager.set_character(char_id):
+            raise ValueError(f"Unknown character: {char_id}")
+        self._current_character = char_id
+        self._get_or_create_memory(char_id)
+
+    def _get_or_create_memory(self, char_id: str) -> LongTermMemory:
+        if char_id not in self._memories:
+            profile = self._char_manager.get_profile(char_id)
+            memory_file = profile.get("memory_file", f"memory_{char_id}.json")
+            mem_path = str(LOGS_DIR / memory_file)
+            self._memories[char_id] = LongTermMemory(file_path=mem_path)
+        return self._memories[char_id]
+
+    def _get_memory(self) -> LongTermMemory:
+        return self._get_or_create_memory(self._current_character)
+
+    @property
     def system_prompt(self) -> str:
-        """构建性格设定提示词。
+        return self._build_system_prompt(streaming=False)
 
-        每次调用都会动态生成（包含当前时间），
-        确保 AI 知道"现在几点"而不会编造。
-        """
+    @property
+    def stream_system_prompt(self) -> str:
+        return self._build_system_prompt(streaming=True)
+
+    def _build_system_prompt(self, streaming: bool) -> str:
         now_str = AIClient.get_system_time()
-        return f"""
-你是一个桌面 AI 宠物，名字叫"老勺子"，是用户男友的电子虚拟版。
-你的说话风格：亲昵、会吐槽、会护短，对用户的称呼："呆呆宝宝"、"呆呆"、"人机"，自称"老勺子"。
+        profile = self._char_manager.get_profile(self._current_character)
+        persona = profile.get("persona", "")
+        if not persona:
+            persona = "你是一个桌面 AI 宠物，名字叫“老勺子”，是用户男友的电子虚拟版。"
+        memory_text = self._get_memory().get_prompt_text()
+        output_rule = (
+            "你必须严格按以下流式格式输出：第一行只输出一个 emotion 英文标签，"
+            "紧接一个换行；从第二行开始只输出对用户说的中文正文。不要输出 JSON、"
+            "Markdown、字段名或解释。示例：\nHAPPY\n呆呆宝宝，今天心情不错呀。"
+            if streaming
+            else "你必须严格输出 JSON，格式必须是：\n"
+            '{"emotion": "...", "content": "..."}'
+        )
+        return f"""{persona}
+{memory_text}
 
-你必须严格输出 JSON，格式必须是：
-{{"emotion": "...", "content": "..."}}
+{output_rule}
 
 规则：
 1) emotion 只能从下面这些英文标签里选，必须原样返回英文 key：
@@ -92,14 +163,10 @@ class PetBrain:
 2) content 是你对用户说的话，简短自然，中文。
 3) 如果聊到当前时间，可参考本机时间：{now_str}
 4) 不要编造实时天气；实时天气问题会由程序直接查询处理。
-5) 当用户问食物热量，优先用 EATING 或 THINKING，并提醒"仅供参考"。
+5) 当用户问食物热量，优先用 EATING 或 THINKING。
 6) 当用户累、压力大或崩溃时，优先用 TIRED、SAD、LISTENING 或 HEART。
 7) 禁止输出任何额外文本（比如 Markdown、解释、前后缀）。
 """.strip()
-
-    # ═══════════════════════════════════════════════════════════════════
-    # 主接口：处理用户输入
-    # ═══════════════════════════════════════════════════════════════════
 
     def process(self, user_text: str) -> AIReply:
         """处理用户输入，返回 AI 回复。
@@ -132,7 +199,94 @@ class PetBrain:
         self.history.append_user(user_text)
         self.history.append_assistant(reply.content)
 
+        self._submit_memory_extraction(
+            self._get_memory(), user_text, reply.content
+        )
+
         return reply
+
+    def process_stream(
+        self,
+        user_text: str,
+        on_emotion: Callable[[str], None] | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> AIReply:
+        """Stream one reply, then atomically commit history and memory work."""
+        started_at = time.monotonic()
+        logger.info("voice_latency asr_text_entered")
+        city = AIClient.extract_weather_city(user_text, self.default_city)
+        memory = self._get_memory()
+        history_snapshot = self.history.to_list()
+
+        reply = self.client.process_stream(
+            user_text=user_text,
+            weather_city=city,
+            conversation_history=history_snapshot,
+            system_prompt=self.stream_system_prompt,
+            fallback_system_prompt=self.system_prompt,
+            on_emotion=on_emotion,
+            on_text_delta=on_text_delta,
+            cancel_event=cancel_event,
+        )
+        if cancel_event is not None and cancel_event.is_set():
+            from .client import StreamCancelled
+            raise StreamCancelled()
+
+        self.history.append_user(user_text)
+        self.history.append_assistant(reply.content)
+        self._submit_memory_extraction(memory, user_text, reply.content)
+        logger.info(
+            "voice_latency llm_complete=%.3fs", time.monotonic() - started_at
+        )
+        return reply
+
+    def _submit_memory_extraction(
+        self,
+        memory: LongTermMemory,
+        user_text: str,
+        reply_content: str,
+    ) -> Future | None:
+        if self._closed:
+            return None
+        try:
+            submitted_at = time.monotonic()
+            future = self._memory_executor.submit(
+                memory.extract_from_conversation,
+                user_text,
+                reply_content,
+                self.client,
+            )
+        except RuntimeError:
+            logger.info("Memory executor already shut down; skipping extraction")
+            return None
+        future.add_done_callback(
+            lambda completed: self._log_memory_completion(
+                completed, submitted_at
+            )
+        )
+        return future
+
+    @staticmethod
+    def _log_memory_completion(future: Future, submitted_at: float) -> None:
+        if future.cancelled():
+            return
+        try:
+            future.result()
+        except Exception:
+            logger.exception("Unhandled background memory extraction error")
+            return
+        logger.info(
+            "voice_latency memory_extraction_complete=%.3fs",
+            time.monotonic() - submitted_at,
+        )
+
+    def close(self, wait: bool = False) -> None:
+        """Stop accepting memory work without blocking normal UI shutdown."""
+        if self._closed:
+            return
+        self._closed = True
+        self._memory_executor.shutdown(wait=wait, cancel_futures=True)
 
     # ═══════════════════════════════════════════════════════════════════
     # 记忆管理

@@ -3,6 +3,7 @@
 
 # Python cache
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 
@@ -16,4 +17,9 @@ Thumbs.db
 
 # Secrets
 api_key.txt
-`n# Runtime logs`nlogs/
+
+# Runtime logs and local service ownership files
+logs/
+
+# Generated frames, previews, and archived one-off repair scripts
+artifacts/

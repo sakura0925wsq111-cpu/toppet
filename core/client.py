@@ -15,16 +15,21 @@ AI 客户端 —— 与大模型 API 交互的纯逻辑层
 from __future__ import annotations
 
 import json
+import logging
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import quote
 
 import requests
 from openai import OpenAI
 
 from .config import WEEKDAY_NAMES, WEATHER_KEYWORDS
+
+logger = logging.getLogger(__name__)
 
 # 从 emotion_scheduler 导入情绪相关常量
 # 注意：避免循环导入，只在需要时延迟导入
@@ -46,6 +51,122 @@ class AIReply:
     emotion: str
     content: str
     is_local: bool = False
+
+
+class StreamCancelled(Exception):
+    """Raised internally when a streaming request is intentionally cancelled."""
+
+
+class StreamCancelToken:
+    """Thread-safe cancellation event that also closes an attached HTTP stream."""
+
+    def __init__(self):
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._stream: Any | None = None
+
+    def is_set(self) -> bool:
+        return self._event.is_set()
+
+    def set(self) -> None:
+        self._event.set()
+        with self._lock:
+            stream = self._stream
+        self._close(stream)
+
+    def attach(self, stream: Any) -> None:
+        with self._lock:
+            self._stream = stream
+            cancelled = self._event.is_set()
+        if cancelled:
+            self._close(stream)
+
+    def detach(self, stream: Any) -> None:
+        with self._lock:
+            if self._stream is stream:
+                self._stream = None
+
+    @staticmethod
+    def _close(stream: Any | None) -> None:
+        close = getattr(stream, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                logger.debug("Failed to close cancelled LLM stream", exc_info=True)
+
+
+class StreamingReplyParser:
+    """Parse ``EMOTION\ncontent`` while preserving arbitrary token boundaries."""
+
+    def __init__(
+        self,
+        on_emotion: Callable[[str], None] | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
+    ):
+        self._on_emotion = on_emotion
+        self._on_text_delta = on_text_delta
+        self._header = ""
+        self._header_done = False
+        self.emotion = "NEUTRAL"
+        self.content_parts: list[str] = []
+
+    @property
+    def content(self) -> str:
+        return "".join(self.content_parts)
+
+    @property
+    def has_content(self) -> bool:
+        return bool(self.content.strip())
+
+    def feed(self, delta: str) -> None:
+        if not delta:
+            return
+        if self._header_done:
+            self._emit_content(delta)
+            return
+
+        self._header += delta
+        newline = self._header.find("\n")
+        if newline < 0:
+            return
+
+        raw_header = self._header[:newline]
+        remainder = self._header[newline + 1 :]
+        self._header = ""
+        self._finish_header(raw_header)
+        if remainder:
+            self._emit_content(remainder)
+
+    def finish(self) -> None:
+        if self._header_done:
+            return
+        # A non-conforming model may omit the emotion line. Treat its buffered
+        # output as content rather than dropping a useful partial response.
+        buffered = self._header
+        self._header = ""
+        raw = buffered.strip().strip("`#* ")
+        normalized = AIClient.normalize_emotion(raw)
+        if raw and (normalized != "NEUTRAL" or raw.upper() == "NEUTRAL"):
+            self._finish_header(buffered)
+            return
+        self._finish_header("NEUTRAL")
+        if buffered:
+            self._emit_content(buffered)
+
+    def _finish_header(self, raw_header: str) -> None:
+        cleaned = raw_header.strip().strip("`#* ")
+        if ":" in cleaned or "：" in cleaned:
+            cleaned = re.split(r"[:：]", cleaned, maxsplit=1)[-1].strip()
+        self.emotion = AIClient.normalize_emotion(cleaned)
+        self._header_done = True
+        if self._on_emotion is not None:
+            self._on_emotion(self.emotion)
+
+    def _emit_content(self, text: str) -> None:
+        self.content_parts.append(text)
+        if self._on_text_delta is not None:
+            self._on_text_delta(text)
 
 
 # =============================================================================
@@ -150,6 +271,134 @@ class AIClient:
             is_local=False,
         )
 
+    def process_stream(
+        self,
+        user_text: str,
+        weather_city: str = "上海",
+        conversation_history: list[dict[str, str]] | None = None,
+        system_prompt: str | None = None,
+        fallback_system_prompt: str | None = None,
+        on_emotion: Callable[[str], None] | None = None,
+        on_text_delta: Callable[[str], None] | None = None,
+        cancel_event: threading.Event | StreamCancelToken | None = None,
+    ) -> AIReply:
+        """Stream an ``EMOTION\ncontent`` reply through lightweight callbacks.
+
+        A failure before any useful content falls back to the established JSON
+        request. Once content has been delivered, retrying would duplicate
+        speech, so a mid-stream failure returns the useful partial response.
+        """
+        if cancel_event is not None and cancel_event.is_set():
+            raise StreamCancelled()
+
+        local_reply = self._build_local_reply(user_text, weather_city)
+        if local_reply is not None or self._client is None:
+            reply = local_reply or self.process(
+                user_text,
+                weather_city=weather_city,
+                conversation_history=conversation_history,
+                system_prompt=fallback_system_prompt or system_prompt,
+            )
+            if cancel_event is not None and cancel_event.is_set():
+                raise StreamCancelled()
+            if on_emotion is not None:
+                on_emotion(reply.emotion)
+            if on_text_delta is not None:
+                on_text_delta(reply.content)
+            return reply
+
+        messages = self._build_messages(
+            user_text, conversation_history, system_prompt
+        )
+        parser = StreamingReplyParser(on_emotion, on_text_delta)
+        started_at = time.monotonic()
+        first_token_at: float | None = None
+
+        stream = None
+        try:
+            stream = self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=self.temperature,
+                max_tokens=self.max_tokens,
+                stream=True,
+            )
+            attach = getattr(cancel_event, "attach", None)
+            if callable(attach):
+                attach(stream)
+            for chunk in stream:
+                if cancel_event is not None and cancel_event.is_set():
+                    StreamCancelToken._close(stream)
+                    raise StreamCancelled()
+                delta = self._stream_delta_content(chunk)
+                if not delta:
+                    continue
+                if first_token_at is None:
+                    first_token_at = time.monotonic()
+                    logger.info(
+                        "voice_latency llm_first_token=%.3fs",
+                        first_token_at - started_at,
+                    )
+                parser.feed(delta)
+            if cancel_event is not None and cancel_event.is_set():
+                raise StreamCancelled()
+            parser.finish()
+            if not parser.has_content:
+                logger.warning(
+                    "LLM stream completed without content; falling back to JSON request"
+                )
+                fallback = self.process(
+                    user_text,
+                    weather_city=weather_city,
+                    conversation_history=conversation_history,
+                    system_prompt=fallback_system_prompt or system_prompt,
+                )
+                if cancel_event is not None and cancel_event.is_set():
+                    raise StreamCancelled()
+                if on_emotion is not None:
+                    on_emotion(fallback.emotion)
+                if on_text_delta is not None:
+                    on_text_delta(fallback.content)
+                return fallback
+        except StreamCancelled:
+            raise
+        except Exception:
+            if parser.has_content:
+                parser.finish()
+                logger.exception(
+                    "LLM stream interrupted after useful content; keeping partial reply"
+                )
+            else:
+                logger.exception(
+                    "LLM stream failed before content; falling back to JSON request"
+                )
+                fallback = self.process(
+                    user_text,
+                    weather_city=weather_city,
+                    conversation_history=conversation_history,
+                    system_prompt=fallback_system_prompt or system_prompt,
+                )
+                if cancel_event is not None and cancel_event.is_set():
+                    raise StreamCancelled()
+                if on_emotion is not None:
+                    on_emotion(fallback.emotion)
+                if on_text_delta is not None:
+                    on_text_delta(fallback.content)
+                return fallback
+        finally:
+            detach = getattr(cancel_event, "detach", None)
+            if callable(detach) and stream is not None:
+                detach(stream)
+
+        normalized = self.normalize_ai_reply(
+            {"emotion": parser.emotion, "content": parser.content}
+        )
+        return AIReply(
+            emotion=normalized["emotion"],
+            content=normalized["content"],
+            is_local=False,
+        )
+
     # ═══════════════════════════════════════════════════════════════════
     # 本地处理：天气 + 时间
     # ═══════════════════════════════════════════════════════════════════
@@ -250,9 +499,66 @@ class AIClient:
             text = completion.choices[0].message.content or "{}"
         return self.normalize_ai_reply(self.parse_json_reply(text))
 
+    @staticmethod
+    def _stream_delta_content(chunk: Any) -> str:
+        """Read a text delta from OpenAI-compatible object or dict chunks."""
+        try:
+            choices = chunk.choices
+            if not choices:
+                return ""
+            return choices[0].delta.content or ""
+        except AttributeError:
+            choices = chunk.get("choices", []) if isinstance(chunk, dict) else []
+            if not choices:
+                return ""
+            delta = choices[0].get("delta", {})
+            return delta.get("content") or ""
+
     # ═══════════════════════════════════════════════════════════════════
     # 静态工具方法
     # ═══════════════════════════════════════════════════════════════════
+
+
+    def chat_simple(
+        self,
+        messages: list[dict[str, str]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+        timeout: float | None = None,
+    ) -> str:
+        """Simple chat completion - direct API call returning plain text.
+
+        Used by LongTermMemory.extract_from_conversation() and other callers
+        that don't need JSON parsing or local weather/time handling.
+
+        Args:
+            messages: List of message dicts with role and content.
+            temperature: Override temperature, None uses instance default.
+            max_tokens: Override max tokens, None uses instance default.
+
+        Returns:
+            Raw text response from the model; empty string on failure or
+            when no API Key is configured.
+        """
+        if self._client is None:
+            return ""
+
+        try:
+            request_client = self._client
+            if timeout is not None:
+                request_client = self._client.with_options(
+                    timeout=timeout,
+                    max_retries=0,
+                )
+            completion = request_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=temperature if temperature is not None else self.temperature,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+            )
+            return completion.choices[0].message.content or ""
+        except Exception:
+            return ""
 
     @staticmethod
     def is_weather_question(text: str) -> bool:
@@ -403,7 +709,7 @@ class AIClient:
         """
         # 延迟导入以避免循环依赖
         if emotion_aliases is None or valid_emotions is None:
-            from emotion_scheduler import EMOTION_ALIASES, VALID_EMOTIONS
+            from systems.emotion_scheduler import EMOTION_ALIASES, VALID_EMOTIONS
             if emotion_aliases is None:
                 emotion_aliases = EMOTION_ALIASES
             if valid_emotions is None:
@@ -422,6 +728,14 @@ class AIClient:
             content = "呆呆宝宝，我刚刚没组织好语言，再问我一次。"
 
         return {"emotion": emotion, "content": content}
+
+    @staticmethod
+    def normalize_emotion(raw_emotion: str) -> str:
+        """Normalize one streamed emotion label through the existing rules."""
+        normalized = AIClient.normalize_ai_reply(
+            {"emotion": raw_emotion, "content": "placeholder"}
+        )
+        return normalized["emotion"]
 
     # ═══════════════════════════════════════════════════════════════════
     # 天气 API

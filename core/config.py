@@ -10,16 +10,21 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+from common.paths import (
+    API_KEY_FILE as API_KEY_PATH,
+    ASSETS_DIR as ASSETS_PATH,
+    PROJECT_ROOT,
+)
+
 # =============================================================================
 # 路径常量
 # =============================================================================
 
-# 宠物程序所在目录（绝对路径）
-APP_DIR: str = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# API Key 文件路径
-API_KEY_FILE: str = os.path.join(APP_DIR, "api_key.txt")
-# 表情图片资源目录
-ASSETS_DIR: str = os.path.join(APP_DIR, "assets")
+# Keep these public constants as strings for backward compatibility. New code
+# should import pathlib-based locations from ``common.paths`` directly.
+APP_DIR: str = str(PROJECT_ROOT)
+API_KEY_FILE: str = str(API_KEY_PATH)
+ASSETS_DIR: str = str(ASSETS_PATH)
 
 
 # =============================================================================

@@ -18,9 +18,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 
-from systems.expression_manager import ExpressionManager
-from systems.idle_scheduler import IdleAction
-from systems.state_machine import PetState
+from .expression_manager import ExpressionManager
+from .idle_scheduler import IdleAction
+from .state_machine import PetState
 
 
 # =============================================================================

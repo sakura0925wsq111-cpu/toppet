@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """
 Core 模块 - 宠物核心逻辑（与 UI 框架无关）
 
@@ -17,6 +17,7 @@ from .config import PetConfig, load_api_key, APP_DIR, API_KEY_FILE
 from .conversation import ConversationHistory
 from .client import AIClient
 from .pet_brain import PetBrain
+from .long_term_memory import LongTermMemory
 
 __all__ = [
     "PetConfig",
@@ -26,4 +27,5 @@ __all__ = [
     "ConversationHistory",
     "AIClient",
     "PetBrain",
+    "LongTermMemory",
 ]

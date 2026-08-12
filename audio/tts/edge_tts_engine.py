@@ -31,6 +31,7 @@ import asyncio
 import io
 import tempfile
 import os
+import time
 
 from .base_tts import TTSEngine
 
@@ -53,6 +54,8 @@ class EdgeTTSEngine(TTSEngine):
         voice: str = "zh-CN-YunxiNeural",
         rate: str = "+0%",
         pitch: str = "+0Hz",
+        max_retries: int = 2,
+        retry_delay: float = 0.5,
     ):
         """初始化 EdgeTTS 引擎。
 
@@ -64,6 +67,8 @@ class EdgeTTSEngine(TTSEngine):
         self._voice = voice
         self._rate = rate
         self._pitch = pitch
+        self._max_retries = max(0, int(max_retries))
+        self._retry_delay = max(0.0, float(retry_delay))
 
     @property
     def engine_name(self) -> str:
@@ -92,18 +97,15 @@ class EdgeTTSEngine(TTSEngine):
         if not text or not text.strip():
             return b""
 
-        try:
-            # 获取或创建事件循环
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries + 1):
             try:
-                loop = asyncio.get_running_loop()
-                # 已有事件循环（如在异步上下文中），用 nest_asyncio 或直接 await
-                # 这里用 run_coroutine_threadsafe 或简单新建
                 return asyncio.run(self._async_synthesize(text))
-            except RuntimeError:
-                # 无事件循环，直接 run
-                return asyncio.run(self._async_synthesize(text))
-        except Exception as exc:
-            raise RuntimeError(f"EdgeTTS 合成失败: {exc}") from exc
+            except Exception as exc:
+                last_error = exc
+                if attempt < self._max_retries:
+                    time.sleep(self._retry_delay * (2**attempt))
+        raise RuntimeError(f"EdgeTTS 合成失败: {last_error}") from last_error
 
     async def _async_synthesize(self, text: str) -> bytes:
         """异步调用 edge-tts 合成语音。
