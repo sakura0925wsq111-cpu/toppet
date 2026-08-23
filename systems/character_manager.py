@@ -17,12 +17,12 @@ Architecture:
            ↓
     CharacterManager.resolve("shinchan", "HAPPY") → "HAPPY"
            ↓
-    UI loads assets/characters/shinchan/HAPPY.gif
+    UI loads characters/shinchan/expressions/HAPPY.gif
 
 Extending with a new character:
-    1. Add a section to config/expression_mapping.json.
-    2. Add assets under assets/characters/<character>/.
-    3. Register in VALID_CHARACTERS if needed (for menu display).
+    1. Add characters/<character>/character.json.
+    2. Add assets under characters/<character>/expressions/.
+    3. Add optional starter_memory.json and voice reference files.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from typing import Optional
 
 from common.paths import (
     CHARACTER_ASSETS_DIR,
+    CHARACTER_PACKS_DIR,
     CHARACTER_PROFILES_FILE,
     EXPRESSION_MAPPING_FILE,
 )
@@ -45,9 +46,18 @@ from common.paths import (
 
 _MAPPING_PATH = EXPRESSION_MAPPING_FILE
 _PROFILES_PATH = CHARACTER_PROFILES_FILE
+_PACKS_PATH = CHARACTER_PACKS_DIR
 
 
-def _load_profiles():
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8-sig") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+
+
+def _load_legacy_profiles():
     try:
         with open(_PROFILES_PATH, "r", encoding="utf-8-sig") as f:
             raw = json.load(f)
@@ -59,6 +69,46 @@ def _load_profiles():
         }
 
 
+def _load_pack_profiles():
+    """Load self-contained character packs from ``characters/<id>``.
+
+    A pack is intentionally just data: ``character.json`` contains the
+    persona/UI/TTS settings and the emotion mapping, while assets live in the
+    pack's ``expressions`` directory.  The private ``_pack_dir`` field is
+    added only in memory so callers can resolve pack-relative files.
+    """
+    profiles = {}
+    if not _PACKS_PATH.is_dir():
+        return profiles
+
+    for pack_dir in sorted(_PACKS_PATH.iterdir(), key=lambda path: path.name):
+        if not pack_dir.is_dir():
+            continue
+        data = _read_json(pack_dir / "character.json")
+        if not isinstance(data, dict):
+            continue
+
+        char_id = str(data.get("id") or pack_dir.name).strip()
+        if not char_id:
+            continue
+        profile = dict(data)
+        profile["_pack_dir"] = os.fspath(pack_dir)
+        profile.setdefault("asset_dir", "expressions")
+        profile.setdefault("memory_file", f"memory_{char_id}.json")
+        if (pack_dir / "starter_memory.json").is_file():
+            profile.setdefault("starter_memory_file", "starter_memory.json")
+        profiles[char_id] = profile
+    return profiles
+
+
+def _load_profiles():
+    # Bundled profiles are authoritative.  Keeping the legacy profiles as a
+    # fallback means older installations can still start before migration.
+    profiles = _load_legacy_profiles()
+    profiles.update(_load_pack_profiles())
+    return profiles
+
+
 _PROFILES = _load_profiles()
 
 
@@ -66,7 +116,8 @@ CHARACTER_DISPLAY_NAMES: dict[str, str] = {
     cid: p.get("display_name", cid) for cid, p in _PROFILES.items()
 }
 
-# Stable character order follows character_profiles.json.
+# Stable character order follows the bundled pack directory, then legacy
+# configuration order for profiles that have not been migrated yet.
 CHARACTER_IDS: tuple[str, ...] = tuple(CHARACTER_DISPLAY_NAMES.keys())
 
 # All valid character identifiers
@@ -99,7 +150,7 @@ class CharacterManager:
         expression = mgr.resolve("HAPPY")    # → "HAPPY" (identity mapping)
 
     The manager:
-    1. Loads expression_mapping.json at init time.
+    1. Loads each character pack's ``character.json`` at init time.
     2. Provides set_character() to switch the active character.
     3. Provides resolve() to map a unified emotion to a character expression.
     4. Handles fallback: if an emotion has no mapping, the emotion itself
@@ -120,19 +171,23 @@ class CharacterManager:
     # ── Mapping loading ────────────────────────────────────────────────
 
     def _load_mapping(self) -> None:
-        """Load expression_mapping.json into memory."""
-        try:
-            with open(_MAPPING_PATH, "r", encoding="utf-8-sig") as f:
-                raw = json.load(f)
-            # Strip metadata keys (those starting with _)
-            self._mapping = {
-                k: v for k, v in raw.items() if not k.startswith("_")
+        """Load embedded pack mappings with a legacy global fallback."""
+        legacy = _read_json(_MAPPING_PATH)
+        legacy_mapping = (
+            {
+                k: v for k, v in legacy.items() if not k.startswith("_")
             }
-            self._loaded = True
-        except (FileNotFoundError, json.JSONDecodeError) as exc:
-            print(f"[CharacterManager] Failed to load mapping: {exc}")
-            self._mapping = {}
-            self._loaded = False
+            if isinstance(legacy, dict)
+            else {}
+        )
+        self._mapping = {}
+        for char_id, profile in self._profiles.items():
+            embedded = profile.get("expression_mapping")
+            if isinstance(embedded, dict):
+                self._mapping[char_id] = embedded
+            else:
+                self._mapping[char_id] = legacy_mapping.get(char_id, {})
+        self._loaded = bool(self._mapping or legacy_mapping)
 
     def reload_mapping(self) -> None:
         """Hot-reload the mapping file (useful during development)."""
@@ -181,6 +236,7 @@ class CharacterManager:
         CHARACTER_IDS = tuple(CHARACTER_DISPLAY_NAMES.keys())
         VALID_CHARACTERS = set(CHARACTER_IDS)
         self._profiles = dict(_PROFILES)
+        self._load_mapping()
 
     # ── Expression resolution ──────────────────────────────────────────
 
@@ -243,7 +299,34 @@ class CharacterManager:
             character: Character id. Defaults to current character.
 
         Returns:
-            Absolute path to assets/characters/<character>/.
+            Absolute path to the character pack's expression directory.
         """
         char = character or self.current_character
+        profile = self.get_profile(char)
+        pack_dir = profile.get("_pack_dir")
+        asset_dir = profile.get("asset_dir")
+        if pack_dir and asset_dir:
+            path = os.fspath(asset_dir)
+            if not os.path.isabs(path):
+                path = os.path.join(pack_dir, path)
+            return os.path.abspath(path)
         return os.fspath(CHARACTER_ASSETS_DIR / char)
+
+    def get_pack_file(
+        self, relative_path: str | None, character: Optional[str] = None
+    ) -> str | None:
+        """Resolve a file stored inside a character pack.
+
+        Legacy profiles do not have a pack directory, so callers can fall
+        back to their old project-level defaults when this returns ``None``.
+        """
+        if not relative_path:
+            return None
+        profile = self.get_profile(character)
+        pack_dir = profile.get("_pack_dir")
+        if not pack_dir:
+            return None
+        path = os.fspath(relative_path)
+        if os.path.isabs(path):
+            return path
+        return os.path.abspath(os.path.join(pack_dir, path))

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import sys
+import argparse
 
 # =====================================================================
 # 🚨 终极防崩溃补丁
@@ -49,28 +50,49 @@ from ui.desktop_pet import DesktopPet
 LAOSHAOZI_MODE = "personal"
 
 
+def create_character(
+    character_id: str = LAOSHAOZI_MODE,
+    config: PetConfig | None = None,
+    start_background_services: bool = True,
+) -> tuple[PetBrain, DesktopPet]:
+    """Build a standalone brain and window for one bundled character."""
+    config = config or PetConfig()
+    brain = PetBrain(config, character=character_id)
+    pet = DesktopPet(
+        config,
+        brain,
+        mode_id=character_id,
+        start_background_services=start_background_services,
+    )
+    return brain, pet
+
+
 def create_laoshaozi(
     config: PetConfig | None = None,
     start_background_services: bool = True,
 ) -> tuple[PetBrain, DesktopPet]:
-    """Build a standalone Laoshaozi brain and window."""
-    config = config or PetConfig()
-    brain = PetBrain(config, character=LAOSHAOZI_MODE)
-    pet = DesktopPet(
-        config,
-        brain,
-        mode_id=LAOSHAOZI_MODE,
+    """Build the original standalone Laoshaozi mode."""
+    return create_character(
+        LAOSHAOZI_MODE,
+        config=config,
         start_background_services=start_background_services,
     )
     return brain, pet
 
 
 def main() -> None:
-    """启动独立的老勺子桌面宠物模式。"""
+    """启动指定角色包；不传参数时仍然启动老勺子。"""
+    parser = argparse.ArgumentParser(description="TopPet character pack runner")
+    parser.add_argument(
+        "--character",
+        default=LAOSHAOZI_MODE,
+        help="character pack ID (default: personal)",
+    )
+    args = parser.parse_args()
     app = QApplication(sys.argv)
 
-    # ── 创建固定为 personal 的老勺子大脑与窗口 ──
-    _brain, pet = create_laoshaozi()
+    # ── 默认 personal；通过 --character 可直接运行其它角色包 ──
+    _brain, pet = create_character(args.character)
     pet.show()
 
     # ── 退出时关闭本地 VoxCPM2 声音服务 ──

@@ -104,6 +104,9 @@ class DesktopPet(QWidget):
         self.brain.current_character = mode_id
         self.character_manager = self.brain.character_manager
         self.mode_profile = self.character_manager.get_profile(mode_id)
+        self.user_address = str(
+            self.mode_profile.get("user_address", self.brain.user_address)
+        ).strip() or "用户"
 
         # ── 检查 API Key ──
         if not self.config.api_key:
@@ -200,10 +203,16 @@ class DesktopPet(QWidget):
         ):
             return
 
-        service = VoxCPMServiceManager(
-            api_url=tts_config.get("api_url", "http://127.0.0.1:9890"),
-            inference_steps=int(tts_config.get("inference_steps", 4)),
+        service_kwargs = {
+            "api_url": tts_config.get("api_url", "http://127.0.0.1:9890"),
+            "inference_steps": int(tts_config.get("inference_steps", 4)),
+        }
+        reference_path = self.character_manager.get_pack_file(
+            tts_config.get("reference_audio"), self.mode_id
         )
+        if reference_path:
+            service_kwargs["reference_path"] = reference_path
+        service = VoxCPMServiceManager(**service_kwargs)
         service.service_ready.connect(self._on_tts_service_ready)
         service.service_failed.connect(self._on_tts_service_failed)
         service.status_update.connect(self._on_tts_service_status)
@@ -264,7 +273,11 @@ class DesktopPet(QWidget):
         """搭建无边框窗口和所有子控件。"""
 
         # ── 窗口属性：无边框、置顶、透明背景 ──
-        self.setWindowTitle(self.config.name)
+        self.setWindowTitle(
+            self.mode_profile.get(
+                "display_name", self.config.name
+            )
+        )
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -658,7 +671,10 @@ class DesktopPet(QWidget):
         if not self._is_current_worker_signal():
             return
         emotion = data.get("emotion", self._tts_emotion or "NEUTRAL")
-        content = data.get("content", "呆呆宝宝，我刚刚脑子短路了，再问我一次～")
+        content = data.get(
+            "content",
+            f"{self.user_address}，我刚刚脑子短路了，再问我一次～",
+        )
         user_text = getattr(self.worker, "user_text", "") if self.worker else ""
 
         # 恢复界面
@@ -696,7 +712,9 @@ class DesktopPet(QWidget):
         self._active_stream_session = None
         self._stream_tts_started = False
         self.apply_emotion_decision(self.emotion_scheduler.on_error())
-        self.chat_output.setText("人机，我这边处理失败了：" + err[:80])
+        self.chat_output.setText(
+            f"{self.user_address}，我这边处理失败了：" + err[:80]
+        )
         self.chat_input.setEnabled(True)
         self.chat_input.setFocus()
         self.voice_button.setEnabled(True)
@@ -868,6 +886,7 @@ class DesktopPet(QWidget):
                 api_url=tts_config.get("api_url", "http://127.0.0.1:9890"),
                 inference_steps=int(tts_config.get("inference_steps", 4)),
                 timeout=float(tts_config.get("timeout_seconds", 120)),
+                voice_id=str(tts_config.get("voice", "laoshaozi-personal")),
             )
             self.tts_manager.set_engine(
                 FallbackTTSEngine(primary, edge_fallback)

@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from audio.asr.whisper_asr import FasterWhisperEngine  # noqa: E402
 from common.paths import (  # noqa: E402
-    CHARACTER_ASSETS_DIR,
+    CHARACTER_PACKS_DIR,
     CHARACTER_PROFILES_FILE,
     EXPRESSION_MAPPING_FILE,
     PROJECT_ROOT,
@@ -26,7 +26,7 @@ class ProjectPathTests(unittest.TestCase):
         self.assertTrue(EXPRESSION_MAPPING_FILE.is_file())
         self.assertEqual(
             Path(CharacterManager().get_character_asset_dir()),
-            CHARACTER_ASSETS_DIR / "personal",
+            CHARACTER_PACKS_DIR / "personal" / "expressions",
         )
 
     def test_audio_assets_are_resolved_independently_of_working_directory(self):
@@ -35,6 +35,21 @@ class ProjectPathTests(unittest.TestCase):
         self.assertEqual(
             Path(FasterWhisperEngine.DEFAULT_MODEL_DIR),
             WHISPER_MODELS_DIR,
+        )
+
+    def test_bundled_profiles_own_assets_and_expression_mapping(self):
+        manager = CharacterManager()
+        self.assertTrue(
+            (CHARACTER_PACKS_DIR / "personal" / "character.json").is_file()
+        )
+        self.assertTrue(
+            (CHARACTER_PACKS_DIR / "personal" / "starter_memory.json").is_file()
+        )
+        self.assertEqual(manager.resolve("HAPPY"), "HAPPY")
+        manager.set_character("shinchan")
+        self.assertEqual(manager.resolve("WORKING"), "THINKING")
+        self.assertTrue(
+            Path(manager.get_character_asset_dir()).is_dir()
         )
 
     def test_project_root_is_repository_root(self):

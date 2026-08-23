@@ -23,3 +23,8 @@ logs/
 
 # Generated frames, previews, and archived one-off repair scripts
 artifacts/
+
+# Generated ESP32 expression assets
+firmware/toppet_pet/data/
+firmware/toppet_pet/expression_manifest.h
+firmware/toppet_pet/net_config.h

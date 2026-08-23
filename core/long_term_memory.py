@@ -44,12 +44,12 @@ class UserMemory:
     """
 
     # 基本信息
-    real_name: str = "陈泽熙"               # 她真正的名字
-    nickname: str = "呆呆"                # 或者你叫她的小名
+    real_name: str = ""                    # 用户主动提供的真实姓名
+    nickname: str = ""                     # 用户希望被称呼的名字
 
     # 重要日子 (MM-DD 格式)
-    birthday: str = "01-05"               # 生日
-    anniversary: str = "10-30"            # 纪念日
+    birthday: str = ""                     # 生日
+    anniversary: str = ""                  # 纪念日
 
     # 喜好与习惯
     favorite_foods: list[str] = field(default_factory=list)     # 爱吃的
@@ -110,36 +110,54 @@ class LongTermMemory:
     EXTRACT_TEMPERATURE: float = 0.3
     EXTRACT_MAX_TOKENS: int = 400
 
-    def __init__(self, file_path: str | None = None):
+    def __init__(
+        self,
+        file_path: str | None = None,
+        starter_memory_path: str | None = None,
+    ):
         """初始化记忆管理器。
 
         Args:
             file_path: memory.json 存放路径。默认为 logs/memory.json。
+            starter_memory_path: 可选的角色包初始记忆。仅在运行时记忆
+                不存在时加载，并复制到运行时文件，之后不再修改角色包。
         """
         if file_path is None:
             self.file_path = os.fspath(LOGS_DIR / "memory.json")
         else:
             self.file_path = file_path
+        self.starter_memory_path = starter_memory_path
 
         self._lock = threading.RLock()
         self.memory = self._load()
+        if starter_memory_path and not os.path.exists(self.file_path):
+            # Seed once so later edits and clearing operate on user data,
+            # never on the bundled character pack.
+            self.save()
 
     # ------------------------------------------------------------------
     # 读写
     # ------------------------------------------------------------------
 
     def _load(self) -> UserMemory:
-        """从 JSON 加载记忆，文件不存在或格式异常时返回默认空实例。"""
-        if not os.path.exists(self.file_path):
+        """Load runtime memory, or a pack starter memory on first launch."""
+        source_path = self.file_path
+        if not os.path.exists(source_path):
+            source_path = self.starter_memory_path
+        if not source_path or not os.path.exists(source_path):
             return UserMemory()
 
         try:
-            with open(self.file_path, "r", encoding="utf-8") as f:
+            with open(source_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # 取消扁平化（兼容旧版数据格式）
+            if not isinstance(data, dict):
+                return UserMemory()
+
+            # Keep compatibility with older flat JSON memory files while
+            # ignoring unknown fields introduced by newer character packs.
             memory = UserMemory()
-            for key, default_value in asdict(memory).items():
+            for key in asdict(memory):
                 if key in data:
                     setattr(memory, key, data[key])
             return memory
@@ -157,6 +175,31 @@ class LongTermMemory:
                     json.dump(data, f, ensure_ascii=False, indent=2)
             except OSError:
                 logger.exception("Failed to save long-term memory")
+
+    def clear(self, restore_starter: bool = False) -> None:
+        """Clear runtime memory, optionally restoring the pack's starter data."""
+        with self._lock:
+            self.memory = UserMemory()
+            if restore_starter and self.starter_memory_path:
+                starter = self._load_file(self.starter_memory_path)
+                if starter is not None:
+                    self.memory = starter
+            self.save()
+
+    @staticmethod
+    def _load_file(file_path: str) -> UserMemory | None:
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return None
+            memory = UserMemory()
+            for key in asdict(memory):
+                if key in data:
+                    setattr(memory, key, data[key])
+            return memory
+        except (json.JSONDecodeError, TypeError, OSError):
+            return None
 
     # ------------------------------------------------------------------
     # 查询

@@ -19,11 +19,13 @@ class VoxCPMTTSEngine(TTSEngine):
         api_url: str = "http://127.0.0.1:9890",
         inference_steps: int = 4,
         timeout: float = 120.0,
+        voice_id: str = "laoshaozi-personal",
         session: requests.Session | None = None,
     ) -> None:
         self._api_url = api_url.rstrip("/")
         self._inference_steps = inference_steps
         self._timeout = timeout
+        self._voice_id = voice_id
         self._session = session or requests.Session()
 
     @property
@@ -32,7 +34,7 @@ class VoxCPMTTSEngine(TTSEngine):
 
     @property
     def voice_id(self) -> str:
-        return "laoshaozi-personal"
+        return self._voice_id
 
     @property
     def audio_format(self) -> str:

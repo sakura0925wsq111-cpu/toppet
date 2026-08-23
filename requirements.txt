@@ -8,6 +8,10 @@ PyQt6>=6.5.0              # 桌面 GUI 框架（无边框窗口、图片渲染�
 openai>=1.0.0             # OpenAI 兼容 API 客户端（调用 DeepSeek 等模型）
 requests>=2.28.0          # HTTP 请求（天气查询等）
 
+# --- TopPet 主机服务 ---
+fastapi>=0.115.0           # HTTP/WebSocket API
+uvicorn[standard]>=0.30.0 # Windows 主机服务运行器
+
 # --- 语音输入 ASR ---
 pyaudio>=0.2.13           # 麦克风音频捕获（按住说话录音）
 faster-whisper>=1.1.0     # 本地语音识别（CTranslate2 加速 Whisper）

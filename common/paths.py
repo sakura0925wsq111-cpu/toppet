@@ -10,6 +10,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CONFIG_DIR = PROJECT_ROOT / "config"
 ASSETS_DIR = PROJECT_ROOT / "assets"
 CHARACTER_ASSETS_DIR = ASSETS_DIR / "characters"
+CHARACTER_PACKS_DIR = PROJECT_ROOT / "characters"
 AUDIO_ASSETS_DIR = ASSETS_DIR / "audio"
 WHISPER_MODELS_DIR = ASSETS_DIR / "whisper_models"
 

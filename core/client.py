@@ -194,6 +194,7 @@ class AIClient:
         model: str = "deepseek-chat",
         temperature: float = 0.9,
         max_tokens: int = 260,
+        user_address: str = "用户",
     ):
         """初始化 AI 客户端。
 
@@ -209,6 +210,7 @@ class AIClient:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.user_address = user_address.strip() or "用户"
 
         # 如果没有 API Key，client 为 None
         # 此时只能处理本地查询（天气/时间），无法进行 AI 对话
@@ -254,7 +256,7 @@ class AIClient:
             return AIReply(
                 emotion="SLEEPY",
                 content=(
-                    "呆呆宝宝，我现在还没配置 DEEPSEEK_API_KEY，"
+                    f"{self.user_address}，我现在还没配置 DEEPSEEK_API_KEY，"
                     "普通聊天先开不了；但问时间和天气我能直接答。"
                 ),
                 is_local=True,
@@ -421,7 +423,7 @@ class AIClient:
                 weather_text = self.get_weather(weather_city)
             return AIReply(
                 emotion="NEUTRAL",
-                content=f"呆呆宝宝，{weather_text}",
+                content=f"{self.user_address}，{weather_text}",
                 is_local=True,
             )
 
@@ -430,7 +432,7 @@ class AIClient:
             time_str = self.get_system_time()
             return AIReply(
                 emotion="HAPPY",
-                content=f"呆呆宝宝，现在是 {time_str}。",
+                content=f"{self.user_address}，现在是 {time_str}。",
                 is_local=True,
             )
 
@@ -497,7 +499,10 @@ class AIClient:
         if not text.strip() or len(text.strip()) < 10:
             completion = self._client.chat.completions.create(**request_args)
             text = completion.choices[0].message.content or "{}"
-        return self.normalize_ai_reply(self.parse_json_reply(text))
+        return self.normalize_ai_reply(
+            self.parse_json_reply(text, fallback_address=self.user_address),
+            fallback_address=self.user_address,
+        )
 
     @staticmethod
     def _stream_delta_content(chunk: Any) -> str:
@@ -662,7 +667,9 @@ class AIClient:
         return city
 
     @staticmethod
-    def parse_json_reply(text: str) -> dict[str, Any]:
+    def parse_json_reply(
+        text: str, fallback_address: str = "用户"
+    ) -> dict[str, Any]:
         """解析模型返回的 JSON。
 
         即使模型包了 Markdown 代码块，也尽量提取 JSON。
@@ -676,8 +683,12 @@ class AIClient:
             flags=re.IGNORECASE | re.DOTALL,
         ).strip()
 
+        fallback = (
+            f"{fallback_address.strip() or '用户'}，"
+            "我刚刚没组织好语言，再问我一次。"
+        )
         if not cleaned:
-            return {"emotion": "NEUTRAL", "content": "呆呆宝宝，我刚刚没组织好语言，再问我一次。"}
+            return {"emotion": "NEUTRAL", "content": fallback}
 
         try:
             data = json.loads(cleaned)
@@ -685,7 +696,7 @@ class AIClient:
             # 尝试从文本中提取第一个 JSON 对象
             match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
             if not match:
-                return {"emotion": "NEUTRAL", "content": "呆呆宝宝，我刚刚没组织好语言，再问我一次。"}
+                return {"emotion": "NEUTRAL", "content": fallback}
             data = json.loads(match.group(0))
 
         if not isinstance(data, dict):
@@ -697,6 +708,7 @@ class AIClient:
         data: dict[str, Any],
         emotion_aliases: dict[str, str] | None = None,
         valid_emotions: set[str] | None = None,
+        fallback_address: str = "用户",
     ) -> dict[str, str]:
         """统一校验模型回复，防止情绪标签或正文缺失。
 
@@ -725,7 +737,10 @@ class AIClient:
 
         content = str(data.get("content", "")).strip()
         if not content:
-            content = "呆呆宝宝，我刚刚没组织好语言，再问我一次。"
+            content = (
+                f"{fallback_address.strip() or '用户'}，"
+                "我刚刚没组织好语言，再问我一次。"
+            )
 
         return {"emotion": emotion, "content": content}
 

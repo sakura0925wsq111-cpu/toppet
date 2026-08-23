@@ -67,13 +67,20 @@ class PetBrain:
             config = PetConfig()
         self.config = config
 
-        # ── 创建 AI 客户端 ──
+        # ── 角色包与 AI 客户端 ──
+        self._char_manager = CharacterManager(current_character=character)
+        self._current_character = character
+        initial_profile = self._char_manager.get_profile(character)
+        self.user_address = str(
+            initial_profile.get("user_address", "用户")
+        ).strip() or "用户"
         self.client = AIClient(
             api_key=config.api_key,
             base_url=config.api_base_url,
             model=config.model,
             temperature=config.ai_temperature,
             max_tokens=config.ai_max_tokens,
+            user_address=self.user_address,
         )
 
         # ── 创建对话记忆 ──
@@ -81,9 +88,7 @@ class PetBrain:
             max_rounds=config.max_conversation_rounds,
         )
 
-        # ── 固定人物模式与独立长期记忆 ──
-        self._char_manager = CharacterManager(current_character=character)
-        self._current_character = character
+        # ── 当前角色的独立长期记忆 ──
         self._memories: dict[str, LongTermMemory] = {}
         self._get_or_create_memory(character)
         self._memory_executor = ThreadPoolExecutor(
@@ -116,6 +121,11 @@ class PetBrain:
         if not self._char_manager.set_character(char_id):
             raise ValueError(f"Unknown character: {char_id}")
         self._current_character = char_id
+        profile = self._char_manager.get_profile(char_id)
+        self.user_address = str(
+            profile.get("user_address", "用户")
+        ).strip() or "用户"
+        self.client.user_address = self.user_address
         self._get_or_create_memory(char_id)
 
     def _get_or_create_memory(self, char_id: str) -> LongTermMemory:
@@ -123,7 +133,13 @@ class PetBrain:
             profile = self._char_manager.get_profile(char_id)
             memory_file = profile.get("memory_file", f"memory_{char_id}.json")
             mem_path = str(LOGS_DIR / memory_file)
-            self._memories[char_id] = LongTermMemory(file_path=mem_path)
+            starter_memory = self._char_manager.get_pack_file(
+                profile.get("starter_memory_file"), char_id
+            )
+            self._memories[char_id] = LongTermMemory(
+                file_path=mem_path,
+                starter_memory_path=starter_memory,
+            )
         return self._memories[char_id]
 
     def _get_memory(self) -> LongTermMemory:
@@ -142,12 +158,14 @@ class PetBrain:
         profile = self._char_manager.get_profile(self._current_character)
         persona = profile.get("persona", "")
         if not persona:
-            persona = "你是一个桌面 AI 宠物，名字叫“老勺子”，是用户男友的电子虚拟版。"
+            display_name = profile.get("display_name", self._current_character)
+            persona = f"你是一个桌面 AI 宠物，名字叫“{display_name}”。"
         memory_text = self._get_memory().get_prompt_text()
+        example = f"{self.user_address}，今天心情不错呀。"
         output_rule = (
             "你必须严格按以下流式格式输出：第一行只输出一个 emotion 英文标签，"
             "紧接一个换行；从第二行开始只输出对用户说的中文正文。不要输出 JSON、"
-            "Markdown、字段名或解释。示例：\nHAPPY\n呆呆宝宝，今天心情不错呀。"
+            f"Markdown、字段名或解释。示例：\nHAPPY\n{example}"
             if streaming
             else "你必须严格输出 JSON，格式必须是：\n"
             '{"emotion": "...", "content": "..."}'
@@ -295,6 +313,10 @@ class PetBrain:
     def clear_memory(self) -> None:
         """清空对话记忆（开始新话题）。"""
         self.history.clear()
+
+    def clear_long_term_memory(self, restore_starter: bool = False) -> None:
+        """Clear the active character's persistent memory."""
+        self._get_memory().clear(restore_starter=restore_starter)
 
     def get_memory_size(self) -> int:
         """返回当前记忆中的消息条数。"""
