@@ -6,7 +6,9 @@
 
 当前固件会把 `characters/personal/expressions` 中的 20 个 GIF 表情全部转换为板载资源。
 待机时保持当前桌宠表情，不再自动轮播；主机回复会驱动情绪表情，播放结束回到 `NEUTRAL`。
-角色显示在屏幕下方，顶部显示带圆角和尾巴的白色中文对话气泡。
+角色显示在屏幕下方，顶部显示带圆角和尾巴的白色中文对话气泡。聆听、思考等
+本地状态使用板载文案；主机回复由电脑渲染为压缩字幕蒙版，显示真实回复正文，
+不再复用表情资源中预制的固定句子。
 动画采用 RGB565 调色板/RLE 编码，存储在 LittleFS 分区中。
 
 ## 构建并烧录
@@ -44,8 +46,11 @@ powershell -ExecutionPolicy Bypass -File firmware\build_and_upload.ps1 -CompileO
 powershell -ExecutionPolicy Bypass -File host_service\start.ps1
 ```
 
-当前固件会在松开 GPIO18 后通过 WebSocket `/ws` 上传 16kHz/16bit/单声道
-PCM，并接收主机归一化后的 WAV，通过 ES8311/GPIO8 播放，GPIO46 控制功放。
+当前固件启动后保持 `toppet-host/v2` WebSocket 长连接。按住 GPIO18 时由
+`AudioCaptureTask` 持续上传 20ms（640 字节）的 16kHz/16bit/单声道 PCM；主机的
+流式裸 PCM 回复进入 16KB 环形缓冲，预缓冲 120ms 后由 `AudioPlaybackTask` 立即
+通过 ES8311/GPIO8 播放，GPIO46 控制功放。网络、采集、播放和 UI 分属独立职责，
+新一轮按键会先清空旧会话音频。主机仍保留 v1 兼容入口。
 
 固件使用以下关键配置：
 

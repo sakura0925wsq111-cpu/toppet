@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import io
+import random
 import sys
 import unittest
 import wave
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -16,6 +19,15 @@ from host_service.audio import (  # noqa: E402
     pcm_to_wav,
 )
 from host_service.pipeline import HostPipeline  # noqa: E402
+from host_service.server import create_app  # noqa: E402
+from host_service.subtitle import (  # noqa: E402
+    MASK_BYTES,
+    build_subtitle_event,
+    encode_zero_literal_rle,
+    render_subtitle_mask,
+)
+from host_service.voxcpm_service import VoxCPMServiceController  # noqa: E402
+from systems.emotion_resolver import EmotionResolver  # noqa: E402
 
 
 class _FakeASR:
@@ -45,6 +57,18 @@ class _FakeBrain:
 
     def close(self, wait=False):
         return None
+
+
+class _FakeVoiceService:
+    def __init__(self):
+        self.started = False
+        self.stopped = False
+
+    def start_and_wait(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
 
 
 class HostServiceTests(unittest.TestCase):
@@ -83,7 +107,15 @@ class HostServiceTests(unittest.TestCase):
         self.assertTrue(result.audio.startswith(b"RIFF"))
         self.assertEqual(
             [event["type"] for event in events],
-            ["state", "transcript", "emotion", "reply", "audio_ready", "state"],
+            [
+                "state",
+                "transcript",
+                "emotion",
+                "reply",
+                "subtitle",
+                "audio_ready",
+                "state",
+            ],
         )
         self.assertEqual(events[0]["state"], "THINKING")
         self.assertEqual(events[-1]["state"], "TALKING")
@@ -101,6 +133,88 @@ class HostServiceTests(unittest.TestCase):
             self.assertEqual(wav_file.getframerate(), 16_000)
             self.assertEqual(wav_file.getnchannels(), 1)
             self.assertEqual(wav_file.getsampwidth(), 2)
+
+    def test_app_lifespan_starts_and_stops_owned_voxcpm_service(self):
+        pipeline = HostPipeline(
+            _FakeBrain(),
+            _FakeASR(),
+            _FakeTTS(),
+            character_id="personal",
+        )
+        voice_service = _FakeVoiceService()
+        app = create_app(pipeline, voxcpm_service=voice_service)
+
+        async def exercise_lifespan():
+            async with app.router.lifespan_context(app):
+                self.assertTrue(voice_service.started)
+                self.assertFalse(voice_service.stopped)
+
+        asyncio.run(exercise_lifespan())
+        self.assertTrue(voice_service.stopped)
+
+    def test_voxcpm_controller_reuses_ready_service_without_spawning(self):
+        controller = VoxCPMServiceController()
+        with (
+            patch.object(controller, "is_ready", return_value=True),
+            patch("host_service.voxcpm_service.subprocess.Popen") as popen,
+        ):
+            controller.start_and_wait()
+            controller.stop()
+
+        popen.assert_not_called()
+        self.assertFalse(controller._owned_process)
+
+    def test_neutral_model_emotion_gets_semantic_hardware_fallback(self):
+        cases = (
+            ("你好呀", "今天过得怎么样？", "NEUTRAL"),
+            ("我今天好难过", "抱抱你，我会陪着你。", "HEART"),
+            ("这个功能完成了", "太棒了！", "CELEBRATE"),
+            ("请检查这段代码", "我来认真检查。", "WORKING"),
+        )
+        for user_text, assistant_text, expected in cases:
+            with self.subTest(expected=expected):
+                pipeline = HostPipeline(
+                    _FakeBrain(),
+                    _FakeASR(),
+                    _FakeTTS(),
+                    character_id="personal",
+                    emotion_resolver=EmotionResolver(random.Random(7)),
+                )
+                pipeline.emotion_resolver.observe_user_input(
+                    user_text,
+                    datetime(2026, 5, 11, 14, 0, 0),
+                )
+                self.assertEqual(
+                    pipeline.emotion_resolver.resolve(
+                        user_text,
+                        assistant_text,
+                        "NEUTRAL",
+                        datetime(2026, 5, 11, 14, 0, 1),
+                    ).emotion,
+                    expected,
+                )
+
+    def test_hardware_subtitle_mask_round_trips_through_rle(self):
+        import base64
+
+        mask = render_subtitle_mask("这是电脑端生成的真实回复字幕。")
+        event = build_subtitle_event("这是电脑端生成的真实回复字幕。")
+        encoded = base64.b64decode(event["data"])
+        decoded = bytearray()
+        offset = 0
+        while offset < len(encoded):
+            header = encoded[offset]
+            offset += 1
+            count = (header & 0x7F) + 1
+            if header & 0x80:
+                decoded.extend(b"\0" * count)
+            else:
+                decoded.extend(encoded[offset:offset + count])
+                offset += count
+
+        self.assertEqual(len(mask), MASK_BYTES)
+        self.assertEqual(bytes(decoded), mask)
+        self.assertLess(len(encode_zero_literal_rle(mask)), len(mask))
 
 
 if __name__ == "__main__":

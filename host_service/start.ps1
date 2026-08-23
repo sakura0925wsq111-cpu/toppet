@@ -2,7 +2,7 @@ param(
     [string]$HostAddress = "0.0.0.0",
     [int]$Port = 8765,
     [string]$Character = "personal",
-    [string]$AsrModel = "small",
+    [string]$AsrModel = "base",
     [string]$AsrDevice = "cpu",
     [string]$AsrComputeType = "int8"
 )

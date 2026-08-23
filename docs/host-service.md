@@ -17,7 +17,20 @@ Invoke-RestMethod http://127.0.0.1:8765/health
 Invoke-RestMethod http://127.0.0.1:8765/api/v1/info
 ```
 
-首次调用 ASR 时会加载本地 faster-whisper 模型；个人角色的 TTS 按角色配置优先调用 VoxCPM2，当前开发配置保留 EdgeTTS 兼容回退。
+当当前角色使用 VoxCPM2 时，主机服务会自动检查 `127.0.0.1:9890`，在需要时
+启动并预热本地 VoxCPM2 服务，确认声音服务就绪后再接受硬件请求。主机退出时只会
+关闭由自己启动的 VoxCPM2 进程；如果使用的是已经手动启动的服务，则不会关闭它。
+
+如需调试或改用外部服务，可以关闭自动启动：
+
+```powershell
+$env:TOPPET_VOXCPM_AUTOSTART = "0"
+powershell -ExecutionPolicy Bypass -File host_service\start.ps1
+```
+
+默认最多等待 180 秒，可以通过 `TOPPET_VOXCPM_STARTUP_TIMEOUT` 调整。
+
+主机启动时会常驻并预热 CPU int8 的 faster-whisper base 模型；个人角色的 TTS 按角色配置优先调用 VoxCPM2，当前开发配置保留 EdgeTTS 兼容回退。
 
 ## HTTP 单次接口
 
@@ -40,44 +53,97 @@ X-Top-Pet-Bits: 16
 
 返回 JSON 包含 `transcript`、`emotion`、`reply`、`audio_format` 和 `audio_base64`。单次 HTTP 适合电脑端诊断和联调；实体端优先使用 WebSocket。
 
-## WebSocket 协议
+## WebSocket v2 流式协议
 
-连接：`ws://<主机 IP>:8765/ws`
-
-客户端先发送：
-
-```json
-{"type":"hello","device_id":"top-pet-01"}
-```
-
-开始一轮录音：
+连接地址仍为 `ws://<主机 IP>:8765/ws`。设备启动后建立一次连接，在多轮会话间
+保持连接；断线后每秒重试，并在成功后重新发送 `hello`。协商消息如下：
 
 ```json
-{"type":"audio_start","session_id":"abc123","sample_rate":16000,"channels":1,"bits_per_sample":16,"content_type":"application/octet-stream"}
+{
+  "type": "hello",
+  "protocol": "toppet-host/v2",
+  "device_id": "top-pet-01",
+  "audio": {
+    "format": "pcm_s16le",
+    "sample_rate": 16000,
+    "channels": 1,
+    "bits_per_sample": 16,
+    "frame_ms": 20
+  }
+}
 ```
 
-随后发送一个或多个二进制 PCM 分片，最后发送：
+主机返回 `hello_ack`，其中 `protocol` 必须为 `toppet-host/v2`。按下 GPIO18 后设备
+立即发送：
 
 ```json
-{"type":"audio_end"}
+{"type":"listen_start","session_id":"设备生成的唯一 ID"}
 ```
 
-主机依次发送 JSON 状态事件：
+每个麦克风帧由一条元数据事件和紧随其后的一个 WebSocket 二进制帧组成。二进制帧
+本身恰好是 640 字节，即 320 个 little-endian int16 样本：
+
+```json
+{"type":"mic_frame","session_id":"同一 ID","sequence":0,"bytes":640}
+```
+
+WebSocket 保证元数据和二进制帧的顺序。主机检查 `session_id`、长度及递增
+`sequence`；缺帧会发出 `PCM_SEQUENCE_MISMATCH` 并插入等长静音，重复/倒序帧会
+丢弃。松开按键后，在最后一个二进制帧之后发送：
+
+```json
+{"type":"listen_stop","session_id":"同一 ID"}
+```
+
+主机不等待完整 LLM 回复或完整 TTS。典型下行顺序为：
 
 ```text
-THINKING → transcript → emotion/reply → audio_ready → TALKING
+stt_final
+emotion
+tts_start
+tts_sentence_start(sequence)
+subtitle
+tts_audio(sequence, bytes) → 紧随一个裸 PCM 二进制帧（可重复多次）
+tts_sentence_end(start_sequence, end_sequence)
+...后续句子...
+reply
+tts_stop
 ```
 
-收到 `audio_start` 事件后，主机以不超过 2048 字节的二进制分片发送 WAV，再发送 `audio_end` 并标记 `IDLE`。主机已把 PCM WAV 归一化为 16kHz、16bit、单声道，便于 ES8311 固定时钟播放；编码格式（例如 MP3）不会被设备端当前播放器处理。
+`tts_audio` 的 PCM 固定为 16kHz、16bit、单声道，没有 WAV 头。设备在收到首批 PCM
+后预缓冲 120ms 即开始播放，不能等待整句。`tts_sentence_start.sequence` 是该句首个
+音频块的全会话序号；设备用它在播放游标真正进入该句时切换字幕，避免提前显示未来
+句子。`subtitle` 仍是主机生成的 480×140 一位蒙版，经 zero/literal RLE 和 Base64
+压缩；角色区继续按 420×340 局部刷新。
 
-取消当前会话：
+所有会话事件都带 `session_id`。设备和主机均只接收当前会话的字幕、表情和音频，
+因此断线残留或被打断会话的迟到帧不会进入新会话。打断消息为：
 
 ```json
-{"type":"cancel"}
+{"type":"abort","session_id":"当前 ID"}
 ```
 
-HTTP 客户端也可以调用 `POST /api/v1/cancel/<session_id>`。共享角色记忆当前按单飞行队列串行处理，避免多个设备同时写入同一会话造成串话。
+设备先本地清空播放环形缓冲并静音，再通知主机；主机协作取消 LLM/TTS 并返回
+`cancelled`。`error` 包含 `code`、`message` 和对应 `session_id`。空 ASR 使用
+`INVALID_AUDIO_OR_TRANSCRIPT`；服务内部错误使用 `HOST_PIPELINE_ERROR`。连接空闲时
+设备可发送 `ping`，主机返回 `pong`。
 
-## 当前边界
+## v1 兼容
 
-服务协议和当前 ESP32 固件已经具备 Wi-Fi、PCM 上传、主机处理和 WAV 播放所需的联调入口。完整产品化仍需继续验证扬声器声学效果、异常断线恢复和多轮稳定性。
+未声明 `protocol: toppet-host/v2` 的连接继续走 `toppet-host/v1`：`audio_start` 后
+上传一个或多个 PCM 二进制块，以 `audio_end` 结束；主机完成整轮处理后发送
+`audio_start`、完整 WAV 二进制分片和 `audio_end`。v1 是诊断/回退路径，不具备首句
+流式延迟优势。HTTP `POST /api/v1/voice` 和 `POST /api/v1/cancel/<session_id>` 同样
+保留。
+
+## 延迟日志与查询
+
+主机所有阶段使用单调时钟记录 `session_id`、`device_id`、`duration_ms`、序号和缓冲
+水位。查询原始记录及 P50/P95：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/api/v2/latency
+```
+
+设备通过串口输出同格式的 `[LATENCY]` 行，包括按键按下/松开、首/末麦克风帧、首个
+TTS 帧、首个 I2S 写入、欠载和播放完成。两端均不使用墙上时钟计算单机阶段耗时。

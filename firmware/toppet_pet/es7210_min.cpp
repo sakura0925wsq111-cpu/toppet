@@ -55,11 +55,15 @@ bool selectAllMicrophones() {
   ok &= updateRegister(0x45, 0x10, 0x10);
   ok &= updateRegister(0x46, 0x10, 0x10);
 
-  // 0 dB gain on all four ADC channels for the first electrical test.
-  ok &= updateRegister(0x43, 0x0f, 0x00);
-  ok &= updateRegister(0x44, 0x0f, 0x00);
-  ok &= updateRegister(0x45, 0x0f, 0x00);
-  ok &= updateRegister(0x46, 0x0f, 0x00);
+  // The board microphones measured close to the noise floor at 0 dB. The
+  // maximum documented analog gain (37.5 dB) still leaves headroom for a
+  // nearby speaker while making normal push-to-talk speech robust enough for
+  // direct beam=1 decoding without a destructive second VAD pass.
+  constexpr uint8_t MIC_GAIN_37_5DB = 0x0f;
+  ok &= updateRegister(0x43, 0x0f, MIC_GAIN_37_5DB);
+  ok &= updateRegister(0x44, 0x0f, MIC_GAIN_37_5DB);
+  ok &= updateRegister(0x45, 0x0f, MIC_GAIN_37_5DB);
+  ok &= updateRegister(0x46, 0x0f, MIC_GAIN_37_5DB);
   return ok;
 }
 

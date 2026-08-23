@@ -50,6 +50,46 @@ class EmotionSchedulerTests(unittest.TestCase):
         self.assertEqual(decision.emotion, "TIRED")
         self.assertGreater(EMOTION_PROFILES[decision.emotion].duration_ms, 0)
 
+    def test_existing_semantic_decision_matrix(self):
+        cases = (
+            ("请检查这段代码", "我在认真分析。", "NEUTRAL", "WORKING"),
+            ("这个功能成功完成了", "一切顺利。", "NEUTRAL", "CELEBRATE"),
+            ("我喜欢你", "抱抱。", "NEUTRAL", "LOVE"),
+            ("记得喝水", "现在就补水。", "NEUTRAL", "DRINKING"),
+            ("今天吃饭", "看起来很好吃。", "NEUTRAL", "EATING"),
+            ("普通话题", "收到。", "难过", "SAD"),
+        )
+        for user_text, assistant_text, model_emotion, expected in cases:
+            with self.subTest(expected=expected):
+                scheduler = PetEmotionScheduler(rng=random.Random(7))
+                decision = scheduler.on_reply(
+                    user_text,
+                    assistant_text,
+                    model_emotion,
+                    self.now,
+                )
+                self.assertEqual(decision.emotion, expected)
+
+    def test_semantic_candidate_can_outrank_conflicting_model_emotion(self):
+        decision = self.scheduler.on_reply(
+            "代码终于成功完成了",
+            "一切顺利。",
+            "SAD",
+            self.now + timedelta(seconds=2),
+        )
+
+        self.assertEqual(decision.emotion, "CELEBRATE")
+
+    def test_invalid_model_label_falls_back_to_neutral(self):
+        decision = self.scheduler.on_reply(
+            "普通话题",
+            "收到。",
+            "not-a-real-emotion",
+            self.now + timedelta(seconds=2),
+        )
+
+        self.assertEqual(decision.emotion, "NEUTRAL")
+
     def test_repeated_praise_triggers_heart_then_cooldown_avoids_repeat(self):
         for i, text in enumerate(("你真棒", "你太厉害了", "你真的好可爱")):
             self.scheduler.on_user_input(text, self.now + timedelta(seconds=i * 20))
@@ -69,6 +109,15 @@ class EmotionSchedulerTests(unittest.TestCase):
 
         self.assertEqual(first.emotion, "HEART")
         self.assertNotEqual(second.emotion, "HEART")
+
+    def test_praise_streak_restarts_after_existing_window(self):
+        self.scheduler.on_user_input("你真棒", self.now)
+        self.scheduler.on_user_input(
+            "你太厉害了",
+            self.now + timedelta(seconds=self.scheduler.praise_window_seconds + 1),
+        )
+
+        self.assertEqual(self.scheduler.praise_streak, 1)
 
     def test_idle_trigger_uses_ambient_emotion_after_threshold(self):
         decision = self.scheduler.maybe_idle(self.now + timedelta(seconds=200))

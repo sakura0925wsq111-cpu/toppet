@@ -11,6 +11,7 @@ class TopPetWebSocketClient {
 
   bool sendText(const String &text);
   bool sendBinary(const uint8_t *data, size_t length);
+  bool sendPong(const uint8_t *data, size_t length);
 
   // Reads one server frame. Payloads larger than capacity are consumed and
   // truncated, which lets the first firmware discard an audio reply safely.

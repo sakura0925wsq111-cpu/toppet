@@ -269,10 +269,16 @@ class LongTermMemory:
 
         # 最近事件
         if m.recent_events:
-            events = "；".join(
-                f"{e.get('date','')} {e.get('summary','')}"
-                for e in m.recent_events[-5:]  # 最多取最近 5 条
-            )
+            formatted_events = []
+            for event in m.recent_events[-5:]:
+                if isinstance(event, dict):
+                    formatted_events.append(
+                        f"{event.get('date', '')} {event.get('summary', '')}".strip()
+                    )
+                elif isinstance(event, str) and event.strip():
+                    # Older memory files stored recent events as plain text.
+                    formatted_events.append(event.strip())
+            events = "；".join(formatted_events)
             lines.append(f"- 最近发生的事：{events}")
 
         # 内部梗
@@ -430,7 +436,8 @@ class LongTermMemory:
                     # recent_events 中 dict，比较 summary 去重
                     item_summary = item.get("summary", "")
                     if not any(
-                        e.get("summary", "") == item_summary
+                        isinstance(e, dict)
+                        and e.get("summary", "") == item_summary
                         for e in existing
                     ):
                         existing.append(item)
@@ -445,6 +452,10 @@ class LongTermMemory:
             # recent_events 按日期排序
             if key == "recent_events":
                 existing.sort(
-                    key=lambda e: e.get("date", "2000-01-01"),
+                    key=lambda e: (
+                        e.get("date", "2000-01-01")
+                        if isinstance(e, dict)
+                        else "2000-01-01"
+                    ),
                     reverse=True,
                 )

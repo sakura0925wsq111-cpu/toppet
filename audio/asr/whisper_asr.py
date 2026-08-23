@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
+
 from common.paths import WHISPER_MODELS_DIR
 
 from .base_asr import ASREngine
@@ -90,12 +92,35 @@ class FasterWhisperEngine(ASREngine):
         if self._model is None:
             self._load_model()
 
-        # 执行推理
+        return self._transcribe_source(audio_path)
+
+    def transcribe_pcm(self, pcm: bytes | np.ndarray, sample_rate: int = 16_000) -> str:
+        """Recognize in-memory 16 kHz mono PCM without a temporary WAV file."""
+        if sample_rate != 16_000:
+            raise ValueError("FasterWhisperEngine expects 16000 Hz PCM")
+        if isinstance(pcm, bytes):
+            if not pcm or len(pcm) % 2:
+                raise ValueError("PCM must contain complete signed 16-bit samples")
+            audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+            audio *= 1.0 / 32768.0
+        else:
+            audio = np.asarray(pcm, dtype=np.float32).reshape(-1)
+        if not audio.size:
+            return ""
+        return self._transcribe_source(audio)
+
+    def _transcribe_source(self, source: str | np.ndarray) -> str:
+        if self._model is None:
+            self._load_model()
         segments, _info = self._model.transcribe(
-            audio_path,
+            source,
             language=self._language if self._language != "auto" else None,
-            beam_size=5,
-            vad_filter=True,  # 启用 VAD 过滤静音段
+            beam_size=1,
+            # GPIO18 already supplies an exact push-to-talk boundary. A
+            # second VAD pass can erase quiet short Chinese syllables from the
+            # board microphone and adds latency, so the hardware path decodes
+            # the bounded array directly.
+            vad_filter=False,
         )
 
         # 拼接所有识别片段

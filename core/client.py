@@ -712,7 +712,7 @@ class AIClient:
     ) -> dict[str, str]:
         """统一校验模型回复，防止情绪标签或正文缺失。
 
-        延迟导入 emotion_scheduler 常量以避免循环依赖。
+        延迟导入 emotion_resolver 常量以避免循环依赖。
 
         Args:
             data: 模型返回的原始字典
@@ -721,7 +721,7 @@ class AIClient:
         """
         # 延迟导入以避免循环依赖
         if emotion_aliases is None or valid_emotions is None:
-            from systems.emotion_scheduler import EMOTION_ALIASES, VALID_EMOTIONS
+            from systems.emotion_resolver import EMOTION_ALIASES, VALID_EMOTIONS
             if emotion_aliases is None:
                 emotion_aliases = EMOTION_ALIASES
             if valid_emotions is None:

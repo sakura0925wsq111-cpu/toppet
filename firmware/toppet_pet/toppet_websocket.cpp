@@ -69,6 +69,10 @@ bool TopPetWebSocketClient::sendBinary(const uint8_t *data, size_t length) {
   return sendFrame(0x2, data, length);
 }
 
+bool TopPetWebSocketClient::sendPong(const uint8_t *data, size_t length) {
+  return sendFrame(0xA, data, length);
+}
+
 bool TopPetWebSocketClient::sendFrame(
     uint8_t opcode, const uint8_t *data, size_t length) {
   if (!client_.connected() || length > 0x7fffffffUL) {
@@ -100,11 +104,22 @@ bool TopPetWebSocketClient::sendFrame(
     return false;
   }
 
-  for (size_t index = 0; index < length; ++index) {
-    const uint8_t value = data == nullptr ? 0 : data[index] ^ mask[index & 3];
-    if (client_.write(&value, 1) != 1) {
+  uint8_t masked_block[512];
+  size_t offset = 0;
+  while (offset < length) {
+    const size_t block_length =
+        length - offset < sizeof(masked_block)
+            ? length - offset
+            : sizeof(masked_block);
+    for (size_t index = 0; index < block_length; ++index) {
+      masked_block[index] =
+          (data == nullptr ? 0 : data[offset + index]) ^
+          mask[(offset + index) & 3];
+    }
+    if (client_.write(masked_block, block_length) != block_length) {
       return false;
     }
+    offset += block_length;
   }
   return true;
 }
@@ -123,10 +138,27 @@ bool TopPetWebSocketClient::readByte(uint8_t &value, uint32_t timeout_ms) {
 
 bool TopPetWebSocketClient::readExact(
     uint8_t *data, size_t length, uint32_t timeout_ms) {
-  for (size_t index = 0; index < length; ++index) {
-    if (!readByte(data[index], timeout_ms)) {
+  size_t offset = 0;
+  const uint32_t deadline = millis() + timeout_ms;
+  while (offset < length) {
+    const int available = client_.available();
+    if (available <= 0) {
+      if (!client_.connected() ||
+          static_cast<int32_t>(millis() - deadline) >= 0) {
+        return false;
+      }
+      delay(1);
+      continue;
+    }
+    const size_t wanted =
+        static_cast<size_t>(available) < length - offset
+            ? static_cast<size_t>(available)
+            : length - offset;
+    const int received = client_.read(data + offset, wanted);
+    if (received <= 0) {
       return false;
     }
+    offset += static_cast<size_t>(received);
   }
   return true;
 }
@@ -156,20 +188,20 @@ bool TopPetWebSocketClient::readFrame(
   opcode = 0;
   uint8_t first = 0;
   uint8_t second = 0;
-  if (!readByte(first, timeout_ms) || !readByte(second, timeout_ms)) {
+  if (!readByte(first, timeout_ms) || !readByte(second, 250)) {
     return false;
   }
   opcode = first & 0x0f;
   uint64_t frame_length = second & 0x7f;
   if (frame_length == 126) {
     uint8_t extended[2];
-    if (!readExact(extended, sizeof(extended), timeout_ms)) {
+    if (!readExact(extended, sizeof(extended), 250)) {
       return false;
     }
     frame_length = (static_cast<uint16_t>(extended[0]) << 8) | extended[1];
   } else if (frame_length == 127) {
     uint8_t extended[8];
-    if (!readExact(extended, sizeof(extended), timeout_ms) || extended[0] != 0) {
+    if (!readExact(extended, sizeof(extended), 250) || extended[0] != 0) {
       return false;
     }
     frame_length = 0;
@@ -180,22 +212,33 @@ bool TopPetWebSocketClient::readFrame(
 
   const bool masked = (second & 0x80) != 0;
   uint8_t mask[4] = {};
-  if (masked && !readExact(mask, sizeof(mask), timeout_ms)) {
+  if (masked && !readExact(mask, sizeof(mask), 250)) {
     return false;
   }
 
-  for (uint64_t index = 0; index < frame_length; ++index) {
-    uint8_t value = 0;
-    if (!readByte(value, timeout_ms)) {
+  uint8_t block[512];
+  uint64_t offset = 0;
+  while (offset < frame_length) {
+    const size_t block_length =
+        frame_length - offset < sizeof(block)
+            ? static_cast<size_t>(frame_length - offset)
+            : sizeof(block);
+    // Once a frame header has arrived, TCP may still split its payload across
+    // several packets. The short caller timeout is only for polling a new
+    // frame header; allow the in-progress payload to finish without losing
+    // WebSocket framing.
+    if (!readExact(block, block_length, 2000)) {
       return false;
     }
-    if (masked) {
-      value ^= mask[index & 3];
+    for (size_t index = 0; index < block_length; ++index) {
+      uint8_t value = block[index];
+      if (masked) value ^= mask[(offset + index) & 3];
+      if (offset + index < capacity && payload != nullptr) {
+        payload[offset + index] = value;
+        ++length;
+      }
     }
-    if (index < capacity && payload != nullptr) {
-      payload[index] = value;
-      ++length;
-    }
+    offset += block_length;
   }
   return true;
 }

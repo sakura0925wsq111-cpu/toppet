@@ -32,7 +32,7 @@ from .client import AIClient, AIReply
 from .long_term_memory import LongTermMemory
 
 # 延迟导入，避免循环依赖
-from systems.emotion_scheduler import EMOTION_PROMPT
+from systems.emotion_resolver import EMOTION_PROMPT
 from systems.character_manager import CharacterManager, DEFAULT_CHARACTER
 
 logger = logging.getLogger(__name__)
@@ -178,6 +178,8 @@ class PetBrain:
 规则：
 1) emotion 只能从下面这些英文标签里选，必须原样返回英文 key：
 {EMOTION_PROMPT}
+   除非回复确实完全没有情绪，否则不要默认选择 NEUTRAL；问候、安慰、喜欢、
+   惊讶、开心、疲惫、工作、学习等场景应优先选择对应的具体标签。
 2) content 是你对用户说的话，简短自然，中文。
 3) 如果聊到当前时间，可参考本机时间：{now_str}
 4) 不要编造实时天气；实时天气问题会由程序直接查询处理。

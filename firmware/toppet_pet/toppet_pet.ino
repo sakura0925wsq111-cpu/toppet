@@ -7,7 +7,13 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <esp_heap_caps.h>
+#include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/event_groups.h>
+#include <freertos/queue.h>
+#include <freertos/stream_buffer.h>
 #include <math.h>
+#include <mbedtls/base64.h>
 
 #include "es7210_min.h"
 #include "es8311.h"
@@ -18,17 +24,35 @@
 
 constexpr uint16_t PET_X = 30;
 constexpr uint16_t PET_Y = 140;
+constexpr uint16_t PET_WIDTH = 420;
+constexpr uint16_t PET_HEIGHT = 340;
 constexpr uint16_t TEXT_MASK_HEIGHT = 140;
 constexpr uint32_t TEXT_MASK_BYTES = LCD_WIDTH * TEXT_MASK_HEIGHT / 8;
+constexpr uint32_t BUBBLE_BUFFER_PIXELS = LCD_WIDTH * TEXT_MASK_HEIGHT;
+constexpr size_t SUBTITLE_ENCODED_BUFFER_BYTES = TEXT_MASK_BYTES * 2;
+constexpr size_t NETWORK_RESPONSE_BUFFER_BYTES = 32 * 1024;
 constexpr uint32_t EXPRESSION_HOLD_MS = 4200;
 constexpr uint32_t RLE_BUFFER_BYTES = 1536;
 constexpr uint32_t BUTTON_DEBOUNCE_MS = 30;
 constexpr uint32_t BUTTON_THINKING_PREVIEW_MS = 1500;
 constexpr uint32_t AUDIO_SAMPLE_RATE = 16000;
-constexpr uint32_t AUDIO_MAX_RECORDING_MS = 5000;
+constexpr uint32_t AUDIO_MAX_RECORDING_MS = 10000;
+constexpr uint32_t AUDIO_RECORDING_IO_TIMEOUT_MS = 30;
+constexpr uint32_t AUDIO_PLAYBACK_IO_TIMEOUT_MS = 250;
+constexpr uint32_t HOST_FRAME_POLL_MS = 20;
 constexpr uint32_t AUDIO_MAX_RECORDING_BYTES =
     AUDIO_SAMPLE_RATE * AUDIO_MAX_RECORDING_MS / 1000 * sizeof(int16_t);
-constexpr size_t AUDIO_READ_BUFFER_BYTES = 2048;
+// One exact 20 ms stereo DMA block. Capture downmixes its 1280 input bytes to
+// one 640-byte mono protocol frame.
+constexpr size_t AUDIO_READ_BUFFER_BYTES = 1280;
+constexpr size_t PCM_FRAME_BYTES = 640;
+constexpr size_t PCM_FRAME_SAMPLES = PCM_FRAME_BYTES / sizeof(int16_t);
+constexpr size_t PLAYBACK_RING_BYTES = 16 * 1024;
+constexpr size_t PLAYBACK_PREBUFFER_BYTES = 5120;  // 160 ms
+constexpr size_t PLAYBACK_LOW_WATER_BYTES = 2560;  // 80 ms
+constexpr size_t PLAYBACK_HIGH_WATER_BYTES = 16000;  // 500 ms
+constexpr uint32_t HOST_RECONNECT_MS = 1000;
+constexpr uint32_t HOST_PING_MS = 5000;
 
 constexpr uint16_t COLOR_BLACK = 0x0000;
 constexpr uint16_t COLOR_WHITE = 0xFFFF;
@@ -66,7 +90,10 @@ Arduino_CO5300 *gfx = new Arduino_CO5300(
     bus, LCD_RESET, 0, LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
 
 static uint16_t *frame_buffer = nullptr;
+static uint16_t *bubble_buffer = nullptr;
 static uint8_t *text_mask = nullptr;
+static uint8_t *subtitle_encoded_buffer = nullptr;
+static uint8_t *network_response_buffer = nullptr;
 static uint8_t *rle_buffer = nullptr;
 static uint16_t palette[256];
 static PetAssetHeader asset_header;
@@ -75,10 +102,6 @@ static File asset_file;
 static uint8_t expression_index = 0;
 static uint8_t animation_frame = 0;
 static uint32_t expression_started_at = 0;
-static int16_t text_left = 0;
-static int16_t text_top = 0;
-static int16_t text_right = 0;
-static int16_t text_bottom = 0;
 static bool raw_button_pressed = false;
 static bool user_button_pressed = false;
 static uint32_t raw_button_changed_at = 0;
@@ -111,6 +134,76 @@ struct PlaybackWavState {
 };
 
 static PlaybackWavState playback_wav;
+static bool playback_active = false;
+
+enum class CaptureCommandType : uint8_t { START, STOP };
+enum class NetworkOutboundType : uint8_t {
+  ABORT,
+  LISTEN_START,
+  MIC_FRAME,
+  LISTEN_STOP,
+};
+enum class PlaybackCommandType : uint8_t { START, END, ABORT };
+enum class UiCommandType : uint8_t {
+  LISTENING,
+  THINKING,
+  EMOTION,
+  SUBTITLE,
+  IDLE,
+  CLEAR,
+};
+
+struct CaptureCommand {
+  CaptureCommandType type;
+  char session_id[48];
+};
+
+struct NetworkOutbound {
+  NetworkOutboundType type;
+  char session_id[48];
+  uint32_t sequence;
+  uint16_t length;
+  uint8_t pcm[PCM_FRAME_BYTES];
+};
+
+struct PlaybackCommand {
+  PlaybackCommandType type;
+  char session_id[48];
+};
+
+struct PlaybackMarker {
+  char session_id[48];
+  uint32_t sequence;
+  uint32_t stream_offset;
+};
+
+struct UiCommand {
+  UiCommandType type;
+  char session_id[48];
+  char emotion[24];
+  uint32_t activate_sequence;
+  char *json;
+};
+
+constexpr EventBits_t EVENT_PLAYBACK_READY = BIT0;
+constexpr EventBits_t EVENT_PLAYBACK_ACTIVE = BIT1;
+constexpr EventBits_t EVENT_PLAYBACK_LOW_WATER = BIT2;
+constexpr EventBits_t EVENT_PLAYBACK_ABORT = BIT3;
+
+static QueueHandle_t capture_command_queue = nullptr;
+static QueueHandle_t network_outbound_queue = nullptr;
+static QueueHandle_t playback_command_queue = nullptr;
+static QueueHandle_t playback_marker_queue = nullptr;
+static QueueHandle_t scheduled_ui_queue = nullptr;
+static QueueHandle_t ui_command_queue = nullptr;
+static StreamBufferHandle_t playback_stream = nullptr;
+static EventGroupHandle_t voice_events = nullptr;
+static StaticQueue_t network_outbound_queue_control;
+static uint8_t *network_outbound_queue_storage = nullptr;
+static char ui_active_session[48] = {};
+static uint32_t session_counter = 0;
+static bool serial_test_pressed = false;
+static String serial_test_command;
 
 bool loadExpression(uint8_t index);
 uint8_t expressionIndexFor(const char *name);
@@ -130,6 +223,32 @@ void setHostEmotion(const char *emotion);
 void resetPlaybackWav();
 void processPlaybackAudio(const uint8_t *data, size_t length);
 void finishPlaybackAudio();
+bool serviceResponseAnimation();
+bool drawSpeechBubble();
+bool applyHostSubtitle(const char *json);
+bool extractJsonStringField(
+    const char *json, const char *field_name, String &value);
+bool extractJsonUIntField(
+    const char *json, const char *field_name, uint32_t &value);
+void audioCaptureTask(void *parameter);
+void networkTask(void *parameter);
+void audioPlaybackTask(void *parameter);
+void serviceUiCommands();
+void createVoiceTasks();
+void inputTask(void *parameter);
+void uiTask(void *parameter);
+void enqueueUiCommand(
+    UiCommandType type, const char *session_id,
+    const char *emotion = nullptr, char *json = nullptr,
+    uint32_t activate_sequence = 0, QueueHandle_t destination = nullptr);
+void beginVoiceCapture(const char *source, bool capture_hardware = true);
+void endVoiceCapture(
+    const char *source, bool capture_hardware = true,
+    uint32_t injected_sequence = 0);
+void serviceSerialTestControl();
+void logLatency(
+    const char *node, const char *session_id, uint32_t duration_ms = 0,
+    int32_t sequence = -1, int32_t buffer_bytes = -1);
 
 void showFatalError(const char *message) {
   Serial.println(message);
@@ -143,82 +262,78 @@ void showFatalError(const char *message) {
   }
 }
 
-inline void setPixel(int16_t x, int16_t y, uint16_t color) {
-  if (x >= 0 && x < LCD_WIDTH && y >= 0 && y < LCD_HEIGHT) {
-    frame_buffer[static_cast<uint32_t>(y) * LCD_WIDTH + x] = color;
-  }
+void fillBubbleHorizontal(
+    int16_t x0, int16_t x1, int16_t y, uint16_t color) {
+  if (y < 0 || y >= TEXT_MASK_HEIGHT || x1 < 0 || x0 >= LCD_WIDTH) return;
+  if (x0 < 0) x0 = 0;
+  if (x1 >= LCD_WIDTH) x1 = LCD_WIDTH - 1;
+  uint16_t *destination =
+      bubble_buffer + static_cast<uint32_t>(y) * LCD_WIDTH + x0;
+  for (int16_t x = x0; x <= x1; ++x) *destination++ = color;
 }
 
-void fillHorizontal(int16_t x0, int16_t x1, int16_t y, uint16_t color) {
-  if (y < 0 || y >= LCD_HEIGHT || x1 < 0 || x0 >= LCD_WIDTH) {
-    return;
-  }
-  if (x0 < 0) {
-    x0 = 0;
-  }
-  if (x1 >= LCD_WIDTH) {
-    x1 = LCD_WIDTH - 1;
-  }
-  uint16_t *destination = frame_buffer + static_cast<uint32_t>(y) * LCD_WIDTH + x0;
-  for (int16_t x = x0; x <= x1; ++x) {
-    *destination++ = color;
-  }
-}
-
-void fillRoundedRectangle(
+void fillBubbleRoundedRectangle(
     int16_t x, int16_t y, int16_t width, int16_t height, int16_t radius,
     uint16_t color) {
   const int32_t radius_squared = radius * radius;
   for (int16_t row = 0; row < height; ++row) {
     int16_t inset = 0;
-    if (row < radius) {
-      const int16_t dy = radius - row - 1;
+    if (row < radius || row >= height - radius) {
+      const int16_t dy = row < radius
+                             ? radius - row - 1
+                             : row - (height - radius);
       while (inset < radius &&
-             (radius - inset) * (radius - inset) + dy * dy > radius_squared) {
-        ++inset;
-      }
-    } else if (row >= height - radius) {
-      const int16_t dy = row - (height - radius);
-      while (inset < radius &&
-             (radius - inset) * (radius - inset) + dy * dy > radius_squared) {
+             (radius - inset) * (radius - inset) + dy * dy >
+                 radius_squared) {
         ++inset;
       }
     }
-    fillHorizontal(x + inset, x + width - inset - 1, y + row, color);
+    fillBubbleHorizontal(x + inset, x + width - inset - 1, y + row, color);
   }
 }
 
-void fillTriangle(
+void fillBubbleTriangle(
     int16_t left_x, int16_t right_x, int16_t top_y,
     int16_t tip_x, int16_t tip_y, uint16_t color) {
   const int16_t height = tip_y - top_y;
   for (int16_t row = 0; row <= height; ++row) {
     const int16_t left = left_x + (tip_x - left_x) * row / height;
     const int16_t right = right_x + (tip_x - right_x) * row / height;
-    fillHorizontal(left, right, top_y + row, color);
+    fillBubbleHorizontal(left, right, top_y + row, color);
   }
 }
 
-bool findTextBounds() {
-  text_left = LCD_WIDTH;
-  text_top = TEXT_MASK_HEIGHT;
-  text_right = -1;
-  text_bottom = -1;
+bool findTextBounds(
+    int16_t &left, int16_t &top, int16_t &right, int16_t &bottom) {
+  left = LCD_WIDTH;
+  top = TEXT_MASK_HEIGHT;
+  right = -1;
+  bottom = -1;
   for (int16_t y = 0; y < TEXT_MASK_HEIGHT; ++y) {
     for (int16_t x = 0; x < LCD_WIDTH; ++x) {
       const uint32_t pixel = static_cast<uint32_t>(y) * LCD_WIDTH + x;
       if (text_mask[pixel >> 3] & (0x80 >> (pixel & 7))) {
-        if (x < text_left) text_left = x;
-        if (x > text_right) text_right = x;
-        if (y < text_top) text_top = y;
-        if (y > text_bottom) text_bottom = y;
+        if (x < left) left = x;
+        if (x > right) right = x;
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
       }
     }
   }
-  return text_right >= text_left && text_bottom >= text_top;
+  return right >= left && bottom >= top;
 }
 
-void drawSpeechBubble() {
+bool drawSpeechBubble() {
+  memset(bubble_buffer, 0, BUBBLE_BUFFER_PIXELS * sizeof(uint16_t));
+  int16_t text_left = 0;
+  int16_t text_top = 0;
+  int16_t text_right = 0;
+  int16_t text_bottom = 0;
+  if (!findTextBounds(text_left, text_top, text_right, text_bottom)) {
+    gfx->fillRect(0, 0, LCD_WIDTH, TEXT_MASK_HEIGHT, COLOR_BLACK);
+    return false;
+  }
+
   const int16_t padding_x = 17;
   const int16_t padding_y = 11;
   int16_t bubble_x = text_left - padding_x;
@@ -235,15 +350,16 @@ void drawSpeechBubble() {
   const int16_t bubble_height = bubble_bottom - bubble_y;
   const int16_t tail_x = LCD_WIDTH / 2;
 
-  fillRoundedRectangle(
-      bubble_x, bubble_y, bubble_width, bubble_height, 16, COLOR_BUBBLE_BORDER);
-  fillTriangle(
+  fillBubbleRoundedRectangle(
+      bubble_x, bubble_y, bubble_width, bubble_height, 16,
+      COLOR_BUBBLE_BORDER);
+  fillBubbleTriangle(
       tail_x - 13, tail_x + 13, bubble_bottom - 2,
       tail_x, bubble_bottom + 20, COLOR_BUBBLE_BORDER);
-  fillRoundedRectangle(
-      bubble_x + 2, bubble_y + 2, bubble_width - 4, bubble_height - 4,
-      14, COLOR_WHITE);
-  fillTriangle(
+  fillBubbleRoundedRectangle(
+      bubble_x + 2, bubble_y + 2, bubble_width - 4, bubble_height - 4, 14,
+      COLOR_WHITE);
+  fillBubbleTriangle(
       tail_x - 9, tail_x + 9, bubble_bottom - 3,
       tail_x, bubble_bottom + 15, COLOR_WHITE);
 
@@ -251,10 +367,106 @@ void drawSpeechBubble() {
     for (int16_t x = text_left; x <= text_right; ++x) {
       const uint32_t pixel = static_cast<uint32_t>(y) * LCD_WIDTH + x;
       if (text_mask[pixel >> 3] & (0x80 >> (pixel & 7))) {
-        frame_buffer[pixel] = COLOR_BLACK;
+        bubble_buffer[pixel] = COLOR_BLACK;
       }
     }
   }
+  gfx->draw16bitRGBBitmap(
+      0, 0, bubble_buffer, LCD_WIDTH, TEXT_MASK_HEIGHT);
+  return true;
+}
+
+bool decodeSubtitleRle(const uint8_t *encoded, size_t encoded_length) {
+  size_t input = 0;
+  size_t output = 0;
+  while (input < encoded_length && output < TEXT_MASK_BYTES) {
+    const uint8_t header = encoded[input++];
+    const size_t count = (header & 0x7f) + 1;
+    if (output + count > TEXT_MASK_BYTES) return false;
+    if (header & 0x80) {
+      memset(text_mask + output, 0, count);
+    } else {
+      if (input + count > encoded_length) return false;
+      memcpy(text_mask + output, encoded + input, count);
+      input += count;
+    }
+    output += count;
+  }
+  return input == encoded_length && output == TEXT_MASK_BYTES;
+}
+
+bool extractJsonStringField(
+    const char *json, const char *field_name, String &value) {
+  String marker = "\"";
+  marker += field_name;
+  marker += "\":\"";
+  const char *cursor = strstr(json, marker.c_str());
+  if (cursor == nullptr) return false;
+  cursor += marker.length();
+  value = "";
+  bool escaped = false;
+  while (*cursor != '\0') {
+    const char current = *cursor++;
+    if (escaped) {
+      if (current == 'n' || current == 'r' || current == 't') {
+        value += ' ';
+      } else {
+        value += current;
+      }
+      escaped = false;
+    } else if (current == '\\') {
+      escaped = true;
+    } else if (current == '"') {
+      return true;
+    } else {
+      value += current;
+    }
+  }
+  return false;
+}
+
+bool extractJsonUIntField(
+    const char *json, const char *field_name, uint32_t &value) {
+  String marker = "\"";
+  marker += field_name;
+  marker += "\":";
+  const char *cursor = strstr(json, marker.c_str());
+  if (cursor == nullptr) return false;
+  cursor += marker.length();
+  while (*cursor == ' ') ++cursor;
+  if (*cursor < '0' || *cursor > '9') return false;
+  value = 0;
+  while (*cursor >= '0' && *cursor <= '9') {
+    value = value * 10 + static_cast<uint32_t>(*cursor - '0');
+    ++cursor;
+  }
+  return true;
+}
+
+void logLatency(
+    const char *node, const char *session_id, uint32_t duration_ms,
+    int32_t sequence, int32_t buffer_bytes) {
+  Serial.printf(
+      "[LATENCY] node=%s session_id=%s device_id=%s monotonic_ms=%llu duration_ms=%lu sequence=%ld buffer_bytes=%ld\n",
+      node, session_id == nullptr ? "" : session_id, TOPPET_DEVICE_ID,
+      static_cast<unsigned long long>(esp_timer_get_time() / 1000ULL),
+      static_cast<unsigned long>(duration_ms), static_cast<long>(sequence),
+      static_cast<long>(buffer_bytes));
+}
+
+bool applyHostSubtitle(const char *json) {
+  String base64_data;
+  if (!extractJsonStringField(json, "data", base64_data)) return false;
+  size_t decoded_length = 0;
+  if (mbedtls_base64_decode(
+          subtitle_encoded_buffer, SUBTITLE_ENCODED_BUFFER_BYTES,
+          &decoded_length,
+          reinterpret_cast<const uint8_t *>(base64_data.c_str()),
+          base64_data.length()) != 0 ||
+      !decodeSubtitleRle(subtitle_encoded_buffer, decoded_length)) {
+    return false;
+  }
+  return drawSpeechBubble();
 }
 
 bool updateUserButton() {
@@ -273,25 +485,175 @@ bool updateUserButton() {
   }
 
   user_button_pressed = sampled_pressed;
-  Serial.printf(
-      "[KEY3/GPIO18] %s at %lu ms\n",
-      user_button_pressed ? "pressed" : "released",
-      static_cast<unsigned long>(now));
-  setButtonTestState(
-      user_button_pressed ? ButtonTestState::LISTENING : ButtonTestState::THINKING);
   if (user_button_pressed) {
-    recording_bytes = 0;
-    if (audio_ready && !es7210Start()) {
-      Serial.println("[AUDIO] ES7210 start failed");
-    }
+    beginVoiceCapture("GPIO18");
   } else {
-    finishRecording();
-    if (audio_ready && !es7210Stop()) {
-      Serial.println("[AUDIO] ES7210 stop failed");
-    }
-    uploadRecording();
+    endVoiceCapture("GPIO18");
   }
   return true;
+}
+
+void beginVoiceCapture(const char *source, bool capture_hardware) {
+    if (ui_active_session[0] != '\0') {
+      NetworkOutbound abort_message = {};
+      abort_message.type = NetworkOutboundType::ABORT;
+      strlcpy(
+          abort_message.session_id, ui_active_session,
+          sizeof(abort_message.session_id));
+      xQueueSend(network_outbound_queue, &abort_message, 0);
+      PlaybackCommand playback_abort = {};
+      playback_abort.type = PlaybackCommandType::ABORT;
+      strlcpy(
+          playback_abort.session_id, ui_active_session,
+          sizeof(playback_abort.session_id));
+      xQueueSend(playback_command_queue, &playback_abort, 0);
+      xEventGroupSetBits(voice_events, EVENT_PLAYBACK_ABORT);
+    }
+    const uint64_t chip_id = ESP.getEfuseMac();
+    snprintf(
+        ui_active_session, sizeof(ui_active_session), "%08lx-%08lx-%08lx",
+        static_cast<unsigned long>(chip_id >> 32),
+        static_cast<unsigned long>(millis()),
+        static_cast<unsigned long>(++session_counter));
+    logLatency("button_pressed", ui_active_session);
+    if (capture_hardware) {
+      CaptureCommand command = {};
+      command.type = CaptureCommandType::START;
+      strlcpy(command.session_id, ui_active_session, sizeof(command.session_id));
+      if (xQueueSend(capture_command_queue, &command, pdMS_TO_TICKS(20)) != pdTRUE) {
+        Serial.println("[AUDIO] capture start queue full");
+      }
+    } else {
+      NetworkOutbound start = {};
+      start.type = NetworkOutboundType::LISTEN_START;
+      strlcpy(start.session_id, ui_active_session, sizeof(start.session_id));
+      xQueueSend(network_outbound_queue, &start, pdMS_TO_TICKS(20));
+    }
+    enqueueUiCommand(
+        UiCommandType::LISTENING, ui_active_session, nullptr, nullptr, 0,
+        nullptr);
+    Serial.printf("[VOICE] source=%s pressed session=%s\n", source, ui_active_session);
+}
+
+void endVoiceCapture(
+    const char *source, bool capture_hardware,
+    uint32_t injected_sequence) {
+    if (ui_active_session[0] == '\0') return;
+    logLatency("button_released", ui_active_session);
+    if (capture_hardware) {
+      CaptureCommand command = {};
+      command.type = CaptureCommandType::STOP;
+      strlcpy(command.session_id, ui_active_session, sizeof(command.session_id));
+      if (xQueueSend(capture_command_queue, &command, pdMS_TO_TICKS(20)) != pdTRUE) {
+        Serial.println("[AUDIO] capture stop queue full");
+      }
+    } else {
+      NetworkOutbound stop = {};
+      stop.type = NetworkOutboundType::LISTEN_STOP;
+      strlcpy(stop.session_id, ui_active_session, sizeof(stop.session_id));
+      stop.sequence = injected_sequence;
+      xQueueSend(network_outbound_queue, &stop, pdMS_TO_TICKS(20));
+    }
+    enqueueUiCommand(
+        UiCommandType::THINKING, ui_active_session, nullptr, nullptr, 0,
+        nullptr);
+    Serial.printf("[VOICE] source=%s released session=%s\n", source, ui_active_session);
+}
+
+void serviceSerialTestControl() {
+  while (Serial.available()) {
+    const char value = static_cast<char>(Serial.read());
+    if (value == '\r') continue;
+    if (value != '\n') {
+      if (serial_test_command.length() < 32) serial_test_command += value;
+      continue;
+    }
+    serial_test_command.trim();
+    if (serial_test_command.startsWith("TEST_PCM ") && !serial_test_pressed) {
+      const uint32_t requested_bytes =
+          static_cast<uint32_t>(serial_test_command.substring(9).toInt());
+      if (requested_bytes == 0 || requested_bytes > AUDIO_MAX_RECORDING_BYTES) {
+        Serial.println("[TEST] INVALID TEST_PCM LENGTH");
+        serial_test_command = "";
+        continue;
+      }
+      serial_test_pressed = true;
+      beginVoiceCapture("USB_PCM", false);
+      uint32_t remaining = requested_bytes;
+      uint32_t sequence = 0;
+      TickType_t frame_wake = xTaskGetTickCount();
+      while (remaining > 0) {
+        NetworkOutbound frame = {};
+        frame.type = NetworkOutboundType::MIC_FRAME;
+        strlcpy(frame.session_id, ui_active_session, sizeof(frame.session_id));
+        frame.sequence = sequence++;
+        frame.length = PCM_FRAME_BYTES;
+        const size_t wanted =
+            remaining < PCM_FRAME_BYTES ? remaining : PCM_FRAME_BYTES;
+        size_t received = 0;
+        const uint32_t deadline = millis() + 1000;
+        while (received < wanted &&
+               static_cast<int32_t>(millis() - deadline) < 0) {
+          const int available = Serial.available();
+          if (available <= 0) {
+            vTaskDelay(1);
+            continue;
+          }
+          const size_t count =
+              static_cast<size_t>(available) < wanted - received
+                  ? static_cast<size_t>(available)
+                  : wanted - received;
+          received += Serial.readBytes(
+              reinterpret_cast<char *>(frame.pcm + received), count);
+        }
+        if (received != wanted) {
+          Serial.println("[TEST] TEST_PCM TIMEOUT");
+          break;
+        }
+        if (wanted < PCM_FRAME_BYTES) {
+          memset(frame.pcm + wanted, 0, PCM_FRAME_BYTES - wanted);
+        }
+        xQueueSend(network_outbound_queue, &frame, pdMS_TO_TICKS(20));
+        remaining -= wanted;
+        vTaskDelayUntil(&frame_wake, pdMS_TO_TICKS(20));
+      }
+      serial_test_pressed = false;
+      endVoiceCapture("USB_PCM", false, sequence);
+      Serial.printf("[TEST] ACK TEST_PCM bytes=%lu frames=%lu\n",
+                    static_cast<unsigned long>(requested_bytes),
+                    static_cast<unsigned long>(sequence));
+    } else if (serial_test_command == "TEST_PRESS" && !serial_test_pressed) {
+      serial_test_pressed = true;
+      beginVoiceCapture("USB_TEST");
+      Serial.println("[TEST] ACK TEST_PRESS");
+    } else if (serial_test_command == "TEST_RELEASE" && serial_test_pressed) {
+      serial_test_pressed = false;
+      endVoiceCapture("USB_TEST");
+      Serial.println("[TEST] ACK TEST_RELEASE");
+    } else if (serial_test_command == "TEST_ABORT") {
+      if (serial_test_pressed) {
+        serial_test_pressed = false;
+        endVoiceCapture("USB_TEST");
+      }
+      if (ui_active_session[0] != '\0') {
+        NetworkOutbound abort_message = {};
+        abort_message.type = NetworkOutboundType::ABORT;
+        strlcpy(abort_message.session_id, ui_active_session,
+                sizeof(abort_message.session_id));
+        xQueueSend(network_outbound_queue, &abort_message, 0);
+        PlaybackCommand playback_abort = {};
+        playback_abort.type = PlaybackCommandType::ABORT;
+        strlcpy(playback_abort.session_id, ui_active_session,
+                sizeof(playback_abort.session_id));
+        xQueueSend(playback_command_queue, &playback_abort, 0);
+        xEventGroupSetBits(voice_events, EVENT_PLAYBACK_ABORT);
+      }
+      Serial.println("[TEST] ACK TEST_ABORT");
+    } else if (!serial_test_command.isEmpty()) {
+      Serial.printf("[TEST] UNKNOWN %s\n", serial_test_command.c_str());
+    }
+    serial_test_command = "";
+  }
 }
 
 void loadNetworkSettings() {
@@ -484,12 +846,19 @@ void processPlaybackAudio(const uint8_t *data, size_t length) {
 }
 
 void finishPlaybackAudio() {
+  // A WebSocket frame may return as soon as its samples are queued. Give the
+  // final DMA block enough time to reach the codec before muting the DAC.
+  if (playback_active) {
+    delay(80);
+  }
   if (es8311_device != nullptr) {
     es8311_voice_mute(es8311_device, true);
   }
   if (playback_wav.ready && playback_wav.supported) {
     Serial.println("[AUDIO] ES8311 reply playback finished");
   }
+  playback_active = false;
+  i2s.setTimeout(AUDIO_RECORDING_IO_TIMEOUT_MS);
 }
 
 void setHostEmotion(const char *emotion) {
@@ -562,27 +931,32 @@ void uploadRecording() {
   Serial.printf("[NET] uploaded PCM session=%s bytes=%lu\n", session_id.c_str(),
                 static_cast<unsigned long>(recording_bytes));
 
-  uint8_t response_buffer[2048];
   resetPlaybackWav();
   const uint32_t response_deadline = millis() + TOPPET_HOST_RESPONSE_TIMEOUT_MS;
   while (static_cast<int32_t>(millis() - response_deadline) < 0) {
+    if (!serviceResponseAnimation()) {
+      Serial.println("[PET] response animation failed");
+      break;
+    }
     size_t response_length = 0;
     uint8_t opcode = 0;
     if (!websocket.readFrame(
-            response_buffer, sizeof(response_buffer), response_length, opcode,
-            1000)) {
+            network_response_buffer, NETWORK_RESPONSE_BUFFER_BYTES,
+            response_length, opcode,
+            HOST_FRAME_POLL_MS)) {
       if (!websocket.connected()) {
         break;
       }
       continue;
     }
     if (opcode == 0x1) {
-      response_buffer[response_length < sizeof(response_buffer)
+      network_response_buffer[
+          response_length < NETWORK_RESPONSE_BUFFER_BYTES
                           ? response_length
-                          : sizeof(response_buffer) - 1] = '\0';
-      Serial.printf("[NET] host: %s\n", response_buffer);
+                          : NETWORK_RESPONSE_BUFFER_BYTES - 1] = '\0';
+      Serial.printf("[NET] host: %s\n", network_response_buffer);
       const char *emotion_marker = strstr(
-          reinterpret_cast<char *>(response_buffer), "\"emotion\":\"");
+          reinterpret_cast<char *>(network_response_buffer), "\"emotion\":\"");
       if (emotion_marker != nullptr) {
         emotion_marker += strlen("\"emotion\":\"");
         char emotion[24] = {};
@@ -595,26 +969,714 @@ void uploadRecording() {
         }
         setHostEmotion(emotion);
       }
-      if (strstr(reinterpret_cast<char *>(response_buffer),
+      if (strstr(reinterpret_cast<char *>(network_response_buffer),
+                 "\"type\":\"subtitle\"")) {
+        if (applyHostSubtitle(
+                reinterpret_cast<char *>(network_response_buffer))) {
+          Serial.println("[PET] dynamic subtitle applied");
+        } else {
+          Serial.println("[PET] dynamic subtitle decode failed");
+        }
+      }
+      if (strstr(reinterpret_cast<char *>(network_response_buffer),
                  "\"type\":\"audio_start\"")) {
+        i2s.setTimeout(AUDIO_PLAYBACK_IO_TIMEOUT_MS);
+        playback_active = true;
         if (es8311_device != nullptr) {
           es8311_voice_mute(es8311_device, false);
         }
         resetPlaybackWav();
       }
-      if (strstr(reinterpret_cast<char *>(response_buffer),
+      if (strstr(reinterpret_cast<char *>(network_response_buffer),
                  "\"type\":\"audio_end\"")) {
         finishPlaybackAudio();
         setButtonTestState(ButtonTestState::IDLE);
         break;
       }
     } else if (opcode == 0x2) {
-      processPlaybackAudio(response_buffer, response_length);
+      processPlaybackAudio(network_response_buffer, response_length);
     } else if (opcode == 0x8) {
       break;
     }
   }
+  if (playback_active) {
+    finishPlaybackAudio();
+  }
   websocket.close();
+}
+
+void enqueueUiCommand(
+    UiCommandType type, const char *session_id, const char *emotion,
+    char *json, uint32_t activate_sequence, QueueHandle_t destination) {
+  UiCommand command = {};
+  command.type = type;
+  strlcpy(command.session_id, session_id == nullptr ? "" : session_id,
+          sizeof(command.session_id));
+  if (emotion != nullptr) {
+    strlcpy(command.emotion, emotion, sizeof(command.emotion));
+  }
+  command.json = json;
+  command.activate_sequence = activate_sequence;
+  QueueHandle_t queue = destination == nullptr ? ui_command_queue : destination;
+  if (xQueueSend(queue, &command, pdMS_TO_TICKS(20)) != pdTRUE) {
+    Serial.println("[UI] command queue full");
+    if (json != nullptr) free(json);
+  }
+}
+
+void audioCaptureTask(void *parameter) {
+  (void)parameter;
+  bool capturing = false;
+  char session_id[48] = {};
+  uint32_t sequence = 0;
+  uint32_t samples_total = 0;
+  uint32_t frame_samples = 0;
+  int16_t frame[PCM_FRAME_SAMPLES] = {};
+  int16_t minimum = 32767;
+  int16_t maximum = -32768;
+  uint64_t sum_squares = 0;
+
+  auto send_network = [](NetworkOutbound &message) {
+    if (xQueueSend(
+            network_outbound_queue, &message,
+            pdMS_TO_TICKS(20)) != pdTRUE) {
+      Serial.printf("[NET] outbound queue full type=%u session=%s\n",
+                    static_cast<unsigned>(message.type), message.session_id);
+    }
+  };
+
+  auto send_frame = [&]() {
+    if (frame_samples == 0) return;
+    if (frame_samples < PCM_FRAME_SAMPLES) {
+      memset(frame + frame_samples, 0,
+             (PCM_FRAME_SAMPLES - frame_samples) * sizeof(int16_t));
+    }
+    NetworkOutbound message = {};
+    message.type = NetworkOutboundType::MIC_FRAME;
+    strlcpy(message.session_id, session_id, sizeof(message.session_id));
+    message.sequence = sequence++;
+    message.length = PCM_FRAME_BYTES;
+    memcpy(message.pcm, frame, PCM_FRAME_BYTES);
+    send_network(message);
+    frame_samples = 0;
+  };
+
+  auto stop_capture = [&]() {
+    if (!capturing) return;
+    send_frame();
+    if (audio_ready && !es7210Stop()) {
+      Serial.println("[AUDIO] ES7210 stop failed");
+    }
+    NetworkOutbound stop = {};
+    stop.type = NetworkOutboundType::LISTEN_STOP;
+    strlcpy(stop.session_id, session_id, sizeof(stop.session_id));
+    stop.sequence = sequence;
+    send_network(stop);
+    const uint32_t mean_square = samples_total == 0
+                                     ? 0
+                                     : static_cast<uint32_t>(
+                                           sum_squares / samples_total);
+    Serial.printf(
+        "[AUDIO] capture session=%s samples=%lu ms=%lu min=%d max=%d rms=%lu frames=%lu\n",
+        session_id, static_cast<unsigned long>(samples_total),
+        static_cast<unsigned long>(samples_total * 1000UL / AUDIO_SAMPLE_RATE),
+        minimum, maximum,
+        static_cast<unsigned long>(sqrtf(static_cast<float>(mean_square))),
+        static_cast<unsigned long>(sequence));
+    capturing = false;
+  };
+
+  while (true) {
+    CaptureCommand command = {};
+    if (xQueueReceive(
+            capture_command_queue, &command,
+            capturing ? 0 : portMAX_DELAY) == pdTRUE) {
+      if (command.type == CaptureCommandType::START) {
+        stop_capture();
+        strlcpy(session_id, command.session_id, sizeof(session_id));
+        sequence = 0;
+        samples_total = 0;
+        frame_samples = 0;
+        minimum = 32767;
+        maximum = -32768;
+        sum_squares = 0;
+        NetworkOutbound start = {};
+        start.type = NetworkOutboundType::LISTEN_START;
+        strlcpy(start.session_id, session_id, sizeof(start.session_id));
+        send_network(start);
+        i2s.setTimeout(AUDIO_RECORDING_IO_TIMEOUT_MS);
+        capturing = audio_ready;
+        if (audio_ready && !es7210Start()) {
+          Serial.println("[AUDIO] ES7210 start failed");
+          capturing = false;
+        }
+      } else if (command.type == CaptureCommandType::STOP &&
+                 strcmp(command.session_id, session_id) == 0) {
+        stop_capture();
+      }
+    }
+    if (!capturing) continue;
+
+    const size_t bytes_read = i2s.readBytes(
+        reinterpret_cast<char *>(audio_read_buffer), sizeof(audio_read_buffer));
+    const size_t stereo_samples = bytes_read / (sizeof(int16_t) * 2);
+    for (size_t index = 0; index < stereo_samples; ++index) {
+      const int16_t sample = audio_read_buffer[index * 2];
+      frame[frame_samples++] = sample;
+      ++samples_total;
+      if (sample < minimum) minimum = sample;
+      if (sample > maximum) maximum = sample;
+      const int32_t wide_sample = sample;
+      sum_squares += static_cast<uint64_t>(wide_sample * wide_sample);
+      if (frame_samples == PCM_FRAME_SAMPLES) send_frame();
+      if (samples_total >=
+          AUDIO_SAMPLE_RATE * AUDIO_MAX_RECORDING_MS / 1000) {
+        Serial.println("[AUDIO] recording limit reached (10s)");
+        stop_capture();
+        break;
+      }
+    }
+    taskYIELD();
+  }
+}
+
+void networkTask(void *parameter) {
+  (void)parameter;
+  TopPetWebSocketClient websocket;
+  uint32_t reconnect_at = 0;
+  uint32_t last_ping_at = 0;
+  char network_session[48] = {};
+  bool listening = false;
+  bool pending_tts_binary = false;
+  char pending_tts_session[48] = {};
+  uint32_t pending_tts_sequence = 0;
+  uint32_t pending_tts_bytes = 0;
+  uint32_t expected_tts_sequence = 0;
+  uint32_t pending_subtitle_sequence = 0;
+  uint32_t stream_written = 0;
+  bool first_mic_sent = false;
+  bool first_tts_received = false;
+  bool high_water_warned = false;
+
+  auto close_socket = [&]() {
+    websocket.close();
+    if (!listening && network_session[0] != '\0') {
+      PlaybackCommand abort = {};
+      abort.type = PlaybackCommandType::ABORT;
+      strlcpy(abort.session_id, network_session, sizeof(abort.session_id));
+      xQueueSend(playback_command_queue, &abort, 0);
+      enqueueUiCommand(UiCommandType::IDLE, network_session);
+      network_session[0] = '\0';
+      pending_tts_binary = false;
+    }
+    reconnect_at = millis() + HOST_RECONNECT_MS;
+  };
+
+  auto connect_host = [&]() -> bool {
+    if (WiFi.status() != WL_CONNECTED ||
+        static_cast<int32_t>(millis() - reconnect_at) < 0) {
+      return false;
+    }
+    if (!websocket.connectTo(network_host.c_str(), network_host_port, "/ws")) {
+      reconnect_at = millis() + HOST_RECONNECT_MS;
+      return false;
+    }
+    String hello = "{\"type\":\"hello\",\"protocol\":\"toppet-host/v2\",\"device_id\":\"";
+    hello += TOPPET_DEVICE_ID;
+    hello += "\",\"audio\":{\"format\":\"pcm_s16le\",\"sample_rate\":16000,\"channels\":1,\"bits_per_sample\":16,\"frame_ms\":20}}";
+    if (!websocket.sendText(hello)) {
+      close_socket();
+      return false;
+    }
+    Serial.printf("[NET] v2 connected host=%s:%u rssi=%d\n",
+                  network_host.c_str(), network_host_port, WiFi.RSSI());
+    last_ping_at = millis();
+    if (listening && network_session[0] != '\0') {
+      String restart = "{\"type\":\"listen_start\",\"session_id\":\"";
+      restart += network_session;
+      restart += "\"}";
+      if (!websocket.sendText(restart)) {
+        close_socket();
+        return false;
+      }
+      expected_tts_sequence = 0;
+    }
+    return true;
+  };
+
+  auto playback_command = [](PlaybackCommandType type, const char *session) {
+    PlaybackCommand command = {};
+    command.type = type;
+    strlcpy(command.session_id, session, sizeof(command.session_id));
+    if (type == PlaybackCommandType::START) {
+      xEventGroupClearBits(voice_events, EVENT_PLAYBACK_READY);
+    }
+    xQueueSend(playback_command_queue, &command, pdMS_TO_TICKS(20));
+    if (type == PlaybackCommandType::START) {
+      xEventGroupWaitBits(
+          voice_events, EVENT_PLAYBACK_READY, pdFALSE, pdTRUE,
+          pdMS_TO_TICKS(250));
+    }
+  };
+
+  while (true) {
+    if (!websocket.connected()) connect_host();
+
+    NetworkOutbound outbound = {};
+    if (websocket.connected() &&
+        xQueueReceive(network_outbound_queue, &outbound, 0) == pdTRUE) {
+      bool sent = true;
+      if (outbound.type == NetworkOutboundType::ABORT) {
+        String json = "{\"type\":\"abort\",\"session_id\":\"";
+        json += outbound.session_id;
+        json += "\"}";
+        sent = websocket.sendText(json);
+        if (strcmp(network_session, outbound.session_id) == 0) {
+          network_session[0] = '\0';
+          listening = false;
+        }
+      } else if (outbound.type == NetworkOutboundType::LISTEN_START) {
+        strlcpy(network_session, outbound.session_id, sizeof(network_session));
+        listening = true;
+        first_mic_sent = false;
+        String json = "{\"type\":\"listen_start\",\"session_id\":\"";
+        json += network_session;
+        json += "\"}";
+        sent = websocket.sendText(json);
+      } else if (outbound.type == NetworkOutboundType::MIC_FRAME) {
+        if (strcmp(network_session, outbound.session_id) != 0 || !listening) {
+          continue;
+        }
+        String json = "{\"type\":\"mic_frame\",\"session_id\":\"";
+        json += outbound.session_id;
+        json += "\",\"sequence\":";
+        json += outbound.sequence;
+        json += ",\"bytes\":";
+        json += outbound.length;
+        json += "}";
+        sent = websocket.sendText(json) &&
+               websocket.sendBinary(outbound.pcm, outbound.length);
+        if (sent && !first_mic_sent) {
+          first_mic_sent = true;
+          logLatency(
+              "first_mic_frame_sent", outbound.session_id, 0,
+              outbound.sequence, 0);
+        }
+      } else if (outbound.type == NetworkOutboundType::LISTEN_STOP) {
+        if (strcmp(network_session, outbound.session_id) != 0) continue;
+        String json = "{\"type\":\"listen_stop\",\"session_id\":\"";
+        json += outbound.session_id;
+        json += "\"}";
+        sent = websocket.sendText(json);
+        listening = false;
+        if (sent) {
+          logLatency(
+              "last_mic_frame_sent", outbound.session_id, 0,
+              static_cast<int32_t>(outbound.sequence) - 1, 0);
+        }
+      }
+      if (!sent) {
+        xQueueSendToFront(network_outbound_queue, &outbound, 0);
+        close_socket();
+      }
+    }
+
+    if (!websocket.connected()) {
+      vTaskDelay(pdMS_TO_TICKS(5));
+      continue;
+    }
+    if (millis() - last_ping_at >= HOST_PING_MS) {
+      if (!websocket.sendText("{\"type\":\"ping\"}")) {
+        close_socket();
+        continue;
+      }
+      last_ping_at = millis();
+    }
+
+    size_t response_length = 0;
+    uint8_t opcode = 0;
+    if (!websocket.readFrame(
+            network_response_buffer, NETWORK_RESPONSE_BUFFER_BYTES - 1,
+            response_length, opcode, 2)) {
+      if (!websocket.connected()) close_socket();
+      vTaskDelay(1);
+      continue;
+    }
+    if (opcode == 0x8) {
+      close_socket();
+      continue;
+    }
+    if (opcode == 0x9) {
+      if (!websocket.sendPong(network_response_buffer, response_length)) {
+        close_socket();
+      }
+      continue;
+    }
+    if (opcode == 0xA) continue;
+    if (opcode == 0x1) {
+      network_response_buffer[response_length] = '\0';
+      const char *json = reinterpret_cast<char *>(network_response_buffer);
+      String type;
+      String event_session;
+      if (!extractJsonStringField(json, "type", type)) continue;
+      extractJsonStringField(json, "session_id", event_session);
+      const bool current = !event_session.isEmpty() &&
+                           strcmp(event_session.c_str(), network_session) == 0;
+      if (type == "emotion" && current) {
+        String emotion;
+        if (extractJsonStringField(json, "emotion", emotion)) {
+          enqueueUiCommand(
+              UiCommandType::EMOTION, event_session.c_str(), emotion.c_str());
+        }
+      } else if (type == "tts_start" && current) {
+        expected_tts_sequence = 0;
+        stream_written = 0;
+        first_tts_received = false;
+        high_water_warned = false;
+        playback_command(PlaybackCommandType::START, event_session.c_str());
+      } else if (type == "tts_sentence_start" && current) {
+        extractJsonUIntField(json, "sequence", pending_subtitle_sequence);
+      } else if (type == "subtitle" && current) {
+        char *copy = static_cast<char *>(heap_caps_malloc(
+            response_length + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (copy != nullptr) {
+          memcpy(copy, json, response_length + 1);
+          enqueueUiCommand(
+              UiCommandType::SUBTITLE, event_session.c_str(), nullptr, copy,
+              pending_subtitle_sequence, scheduled_ui_queue);
+        }
+      } else if (type == "tts_audio" && current) {
+        pending_tts_binary =
+            extractJsonUIntField(json, "sequence", pending_tts_sequence) &&
+            extractJsonUIntField(json, "bytes", pending_tts_bytes);
+        strlcpy(
+            pending_tts_session, event_session.c_str(),
+            sizeof(pending_tts_session));
+      } else if (type == "tts_stop" && current) {
+        playback_command(PlaybackCommandType::END, event_session.c_str());
+      } else if ((type == "cancelled" || type == "error") && current) {
+        playback_command(PlaybackCommandType::ABORT, event_session.c_str());
+        enqueueUiCommand(UiCommandType::IDLE, event_session.c_str());
+      }
+    } else if (opcode == 0x2) {
+      if (!pending_tts_binary ||
+          strcmp(pending_tts_session, network_session) != 0 ||
+          response_length != pending_tts_bytes) {
+        Serial.printf(
+            "[AUDIO] stale/invalid TTS frame session=%s seq=%lu bytes=%u expected=%lu\n",
+            pending_tts_session,
+            static_cast<unsigned long>(pending_tts_sequence), response_length,
+            static_cast<unsigned long>(pending_tts_bytes));
+        pending_tts_binary = false;
+        continue;
+      }
+      pending_tts_binary = false;
+      if (pending_tts_sequence != expected_tts_sequence) {
+        Serial.printf(
+            "[AUDIO] TTS sequence mismatch session=%s expected=%lu got=%lu\n",
+            network_session,
+            static_cast<unsigned long>(expected_tts_sequence),
+            static_cast<unsigned long>(pending_tts_sequence));
+        if (pending_tts_sequence < expected_tts_sequence) continue;
+      }
+      expected_tts_sequence = pending_tts_sequence + 1;
+      PlaybackMarker marker = {};
+      strlcpy(marker.session_id, network_session, sizeof(marker.session_id));
+      marker.sequence = pending_tts_sequence;
+      marker.stream_offset = stream_written;
+      xQueueSend(playback_marker_queue, &marker, pdMS_TO_TICKS(50));
+      size_t offset = 0;
+      while (offset < response_length) {
+        if (xEventGroupGetBits(voice_events) & EVENT_PLAYBACK_ABORT) break;
+        const size_t written = xStreamBufferSend(
+            playback_stream, network_response_buffer + offset,
+            response_length - offset, pdMS_TO_TICKS(50));
+        if (written == 0) {
+          Serial.printf(
+              "[AUDIO] playback overflow backpressure session=%s seq=%lu water=%u\n",
+              network_session,
+              static_cast<unsigned long>(pending_tts_sequence),
+              xStreamBufferBytesAvailable(playback_stream));
+          continue;
+        }
+        offset += written;
+        stream_written += written;
+      }
+      const size_t water = xStreamBufferBytesAvailable(playback_stream);
+      if (!first_tts_received) {
+        first_tts_received = true;
+        logLatency(
+            "first_tts_frame_received", network_session, 0,
+            pending_tts_sequence, water);
+      }
+      if (water > PLAYBACK_HIGH_WATER_BYTES && !high_water_warned) {
+        high_water_warned = true;
+        Serial.printf("[AUDIO] high water session=%s bytes=%u\n",
+                      network_session, water);
+      }
+    }
+  }
+}
+
+void audioPlaybackTask(void *parameter) {
+  (void)parameter;
+  char session_id[48] = {};
+  bool session_open = false;
+  bool started = false;
+  bool input_finished = false;
+  bool first_i2s = false;
+  uint32_t consumed = 0;
+  uint32_t current_sequence = 0;
+  uint32_t underruns = 0;
+  bool underrun_gap = false;
+  uint8_t mono_buffer[PCM_FRAME_BYTES];
+
+  auto drain_scheduled_ui = []() {
+    UiCommand command = {};
+    while (xQueueReceive(scheduled_ui_queue, &command, 0) == pdTRUE) {
+      if (command.json != nullptr) free(command.json);
+    }
+  };
+
+  auto reset_playback = [&]() {
+    xEventGroupSetBits(voice_events, EVENT_PLAYBACK_ABORT);
+    xStreamBufferReset(playback_stream);
+    xQueueReset(playback_marker_queue);
+    drain_scheduled_ui();
+    if (es8311_device != nullptr) es8311_voice_mute(es8311_device, true);
+    playback_active = false;
+    session_open = false;
+    started = false;
+    input_finished = false;
+    first_i2s = false;
+    consumed = 0;
+    current_sequence = 0;
+    underruns = 0;
+    underrun_gap = false;
+    xEventGroupClearBits(
+        voice_events,
+        EVENT_PLAYBACK_ACTIVE | EVENT_PLAYBACK_LOW_WATER);
+  };
+
+  while (true) {
+    PlaybackCommand command = {};
+    while (xQueueReceive(playback_command_queue, &command, 0) == pdTRUE) {
+      if (command.type == PlaybackCommandType::START) {
+        reset_playback();
+        strlcpy(session_id, command.session_id, sizeof(session_id));
+        session_open = true;
+        xEventGroupClearBits(voice_events, EVENT_PLAYBACK_ABORT);
+        xEventGroupSetBits(voice_events, EVENT_PLAYBACK_READY);
+      } else if (strcmp(command.session_id, session_id) == 0) {
+        if (command.type == PlaybackCommandType::END) {
+          input_finished = true;
+        } else {
+          reset_playback();
+        }
+      }
+    }
+    if (!session_open) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
+    }
+
+    const size_t available = xStreamBufferBytesAvailable(playback_stream);
+    if (!started &&
+        (available >= PLAYBACK_PREBUFFER_BYTES ||
+         (input_finished && available > 0))) {
+      started = true;
+      playback_active = true;
+      i2s.setTimeout(AUDIO_PLAYBACK_IO_TIMEOUT_MS);
+      if (es8311_device != nullptr) es8311_voice_mute(es8311_device, false);
+      xEventGroupSetBits(voice_events, EVENT_PLAYBACK_ACTIVE);
+    }
+    if (!started) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
+    }
+
+    PlaybackMarker marker = {};
+    while (xQueuePeek(playback_marker_queue, &marker, 0) == pdTRUE &&
+           marker.stream_offset <= consumed) {
+      xQueueReceive(playback_marker_queue, &marker, 0);
+      if (strcmp(marker.session_id, session_id) == 0) {
+        current_sequence = marker.sequence;
+      }
+    }
+    UiCommand scheduled = {};
+    while (xQueuePeek(scheduled_ui_queue, &scheduled, 0) == pdTRUE &&
+           scheduled.activate_sequence <= current_sequence) {
+      xQueueReceive(scheduled_ui_queue, &scheduled, 0);
+      if (strcmp(scheduled.session_id, session_id) == 0) {
+        if (xQueueSend(ui_command_queue, &scheduled, pdMS_TO_TICKS(20)) != pdTRUE &&
+            scheduled.json != nullptr) {
+          free(scheduled.json);
+        }
+      } else if (scheduled.json != nullptr) {
+        free(scheduled.json);
+      }
+    }
+
+    const size_t received = xStreamBufferReceive(
+        playback_stream, mono_buffer, sizeof(mono_buffer),
+        pdMS_TO_TICKS(30));
+    if (received == 0) {
+      if (input_finished) {
+        delay(80);
+        if (es8311_device != nullptr) es8311_voice_mute(es8311_device, true);
+        logLatency(
+            "playback_finished", session_id, 0, current_sequence, 0);
+        Serial.printf(
+            "[AUDIO] playback finished session=%s underruns=%lu\n",
+            session_id, static_cast<unsigned long>(underruns));
+        enqueueUiCommand(UiCommandType::IDLE, session_id);
+        reset_playback();
+      } else {
+        if (!underrun_gap) {
+          ++underruns;
+          underrun_gap = true;
+          logLatency(
+              "playback_underrun", session_id, 0, current_sequence, 0);
+        }
+      }
+      continue;
+    }
+    underrun_gap = false;
+
+    const size_t sample_count = received / sizeof(int16_t);
+    const int16_t *mono = reinterpret_cast<const int16_t *>(mono_buffer);
+    size_t sample_offset = 0;
+    while (sample_offset < sample_count) {
+      const size_t capacity =
+          sizeof(playback_stereo_buffer) / sizeof(int16_t) / 2;
+      const size_t count =
+          sample_count - sample_offset < capacity
+              ? sample_count - sample_offset
+              : capacity;
+      for (size_t index = 0; index < count; ++index) {
+        const int16_t sample = mono[sample_offset + index];
+        playback_stereo_buffer[index * 2] = sample;
+        playback_stereo_buffer[index * 2 + 1] = sample;
+      }
+      const size_t stereo_bytes = count * sizeof(int16_t) * 2;
+      if (i2s.write(
+              reinterpret_cast<const uint8_t *>(playback_stereo_buffer),
+              stereo_bytes) != stereo_bytes) {
+        Serial.printf("[AUDIO] I2S write failed session=%s\n", session_id);
+      }
+      if (!first_i2s) {
+        first_i2s = true;
+        logLatency(
+            "first_i2s_write", session_id, 0, current_sequence,
+            xStreamBufferBytesAvailable(playback_stream));
+      }
+      sample_offset += count;
+    }
+    consumed += received;
+    const size_t water = xStreamBufferBytesAvailable(playback_stream);
+    if (water < PLAYBACK_LOW_WATER_BYTES && !input_finished) {
+      xEventGroupSetBits(voice_events, EVENT_PLAYBACK_LOW_WATER);
+    } else {
+      xEventGroupClearBits(voice_events, EVENT_PLAYBACK_LOW_WATER);
+    }
+  }
+}
+
+void serviceUiCommands() {
+  UiCommand command = {};
+  while (xQueueReceive(ui_command_queue, &command, 0) == pdTRUE) {
+    const bool current = strcmp(command.session_id, ui_active_session) == 0;
+    if (current && command.type == UiCommandType::LISTENING) {
+      setButtonTestState(ButtonTestState::LISTENING);
+    } else if (current && command.type == UiCommandType::THINKING) {
+      setButtonTestState(ButtonTestState::THINKING);
+    } else if (current && command.type == UiCommandType::EMOTION) {
+      setHostEmotion(command.emotion);
+    } else if (current && command.type == UiCommandType::SUBTITLE &&
+               command.json != nullptr) {
+      if (!applyHostSubtitle(command.json)) {
+        Serial.println("[PET] dynamic subtitle decode failed");
+      }
+    } else if (current && command.type == UiCommandType::IDLE) {
+      ui_active_session[0] = '\0';
+      setButtonTestState(ButtonTestState::IDLE);
+    } else if (current && command.type == UiCommandType::CLEAR) {
+      memset(text_mask, 0, TEXT_MASK_BYTES);
+      drawSpeechBubble();
+    }
+    if (command.json != nullptr) free(command.json);
+  }
+}
+
+void inputTask(void *parameter) {
+  (void)parameter;
+  while (true) {
+    serviceSerialTestControl();
+    updateUserButton();
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+}
+
+void uiTask(void *parameter) {
+  (void)parameter;
+  while (true) {
+    serviceUiCommands();
+    const EventBits_t voice_bits = xEventGroupGetBits(voice_events);
+    if (voice_bits & (EVENT_PLAYBACK_LOW_WATER | EVENT_PLAYBACK_ACTIVE)) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
+    }
+    if (asset_header.frame_count <= 1) {
+      vTaskDelay(pdMS_TO_TICKS(4));
+      continue;
+    }
+    const uint32_t now = millis();
+    const uint16_t duration = frame_entries[animation_frame].duration_ms;
+    if (now - expression_started_at < duration) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
+    }
+    animation_frame = (animation_frame + 1) % asset_header.frame_count;
+    expression_started_at = now;
+    if (!renderCurrentFrame()) {
+      Serial.println("[PET] expression decode failed");
+    }
+  }
+}
+
+void createVoiceTasks() {
+  capture_command_queue = xQueueCreate(4, sizeof(CaptureCommand));
+  playback_command_queue = xQueueCreate(8, sizeof(PlaybackCommand));
+  playback_marker_queue = xQueueCreate(128, sizeof(PlaybackMarker));
+  scheduled_ui_queue = xQueueCreate(16, sizeof(UiCommand));
+  ui_command_queue = xQueueCreate(16, sizeof(UiCommand));
+  playback_stream = xStreamBufferCreate(PLAYBACK_RING_BYTES, PCM_FRAME_BYTES);
+  voice_events = xEventGroupCreate();
+  constexpr UBaseType_t OUTBOUND_QUEUE_LENGTH = 520;
+  network_outbound_queue_storage = static_cast<uint8_t *>(heap_caps_malloc(
+      OUTBOUND_QUEUE_LENGTH * sizeof(NetworkOutbound),
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (network_outbound_queue_storage != nullptr) {
+    network_outbound_queue = xQueueCreateStatic(
+        OUTBOUND_QUEUE_LENGTH, sizeof(NetworkOutbound),
+        network_outbound_queue_storage, &network_outbound_queue_control);
+  }
+  if (!capture_command_queue || !network_outbound_queue ||
+      !playback_command_queue || !playback_marker_queue ||
+      !scheduled_ui_queue || !ui_command_queue || !playback_stream ||
+      !voice_events) {
+    showFatalError("Voice task allocation failed");
+  }
+  xTaskCreatePinnedToCore(
+      audioPlaybackTask, "AudioPlaybackTask", 6144, nullptr, 5, nullptr, 0);
+  xTaskCreatePinnedToCore(
+      audioCaptureTask, "AudioCaptureTask", 6144, nullptr, 4, nullptr, 0);
+  xTaskCreatePinnedToCore(
+      networkTask, "NetworkTask", 8192, nullptr, 3, nullptr, 1);
+  xTaskCreatePinnedToCore(
+      uiTask, "UiTask", 6144, nullptr, 2, nullptr, 1);
+  xTaskCreatePinnedToCore(
+      inputTask, "InputTask", 4096, nullptr, 4, nullptr, 1);
 }
 
 bool initializeAudioInput() {
@@ -630,7 +1692,7 @@ bool initializeAudioInput() {
   // Keep the GPIO18 press/release state machine responsive. The Arduino
   // Stream default is a 1000 ms read timeout, which feels like a freeze when
   // an I2S DMA block is not ready yet.
-  i2s.setTimeout(1);
+  i2s.setTimeout(AUDIO_RECORDING_IO_TIMEOUT_MS);
 
   pinMode(ES8311_PA_CTRL_PIN, OUTPUT);
   digitalWrite(ES8311_PA_CTRL_PIN, HIGH);
@@ -662,6 +1724,10 @@ bool initializeAudioInput() {
   if (!es7210Begin(Wire) || !es7210Start()) {
     Serial.printf("[AUDIO] ES7210 init failed, reg01=0x%02X\n",
                   es7210ReadRegister(0x01));
+    return false;
+  }
+  if (!es7210Stop()) {
+    Serial.println("[AUDIO] ES7210 initial stop failed");
     return false;
   }
   Serial.printf("[AUDIO] ES7210 ready addr=0x%02X rate=%lu bits=16\n",
@@ -765,11 +1831,6 @@ bool loadExpression(uint8_t index) {
   if (!readExact(text_mask, TEXT_MASK_BYTES)) {
     return false;
   }
-  if (!findTextBounds()) {
-    Serial.println("Empty subtitle mask");
-    return false;
-  }
-
   expression_index = index;
   animation_frame = 0;
   expression_started_at = millis();
@@ -799,11 +1860,32 @@ void setButtonTestState(ButtonTestState next_state) {
     expression_name = "THINKING";
     button_thinking_started_at = millis();
   }
-
-  if (!loadExpression(expressionIndexFor(expression_name))) {
+  if (!loadExpression(expressionIndexFor(expression_name)) ||
+      !renderCurrentFrame()) {
     showFatalError("Button state expression failed");
   }
+  if (!drawSpeechBubble()) {
+    showFatalError("Button state subtitle failed");
+  }
+  expression_started_at = millis();
   Serial.printf("[VOICE KEY] state=%s\n", expression_name);
+}
+
+bool serviceResponseAnimation() {
+  // Full-screen display transfers compete with the I2S producer on this first
+  // firmware version. Animate while waiting for ASR/LLM/TTS, then keep the
+  // selected emotion frame still while audio DMA is active to avoid underruns.
+  if (playback_active || asset_header.frame_count <= 1) {
+    return true;
+  }
+  const uint32_t now = millis();
+  const uint16_t duration = frame_entries[animation_frame].duration_ms;
+  if (now - expression_started_at < duration) {
+    return true;
+  }
+  animation_frame = (animation_frame + 1) % asset_header.frame_count;
+  expression_started_at = now;
+  return renderCurrentFrame();
 }
 
 bool decodePetFrame(uint8_t frame_index) {
@@ -836,7 +1918,7 @@ bool decodePetFrame(uint8_t frame_index) {
         const uint16_t row_run =
             run_length < row_remaining ? run_length : row_remaining;
         uint16_t *destination =
-            frame_buffer + static_cast<uint32_t>(PET_Y + row) * LCD_WIDTH + PET_X + column;
+            frame_buffer + static_cast<uint32_t>(row) * PET_WIDTH + column;
         for (uint16_t count = 0; count < row_run; ++count) {
           *destination++ = color;
         }
@@ -849,17 +1931,22 @@ bool decodePetFrame(uint8_t frame_index) {
 }
 
 bool renderCurrentFrame() {
-  memset(frame_buffer, 0, LCD_WIDTH * LCD_HEIGHT * sizeof(uint16_t));
+  const uint32_t started_at = millis();
+  memset(frame_buffer, 0, PET_WIDTH * PET_HEIGHT * sizeof(uint16_t));
   if (!decodePetFrame(animation_frame)) {
     return false;
   }
-  drawSpeechBubble();
-  gfx->draw16bitRGBBitmap(0, 0, frame_buffer, LCD_WIDTH, LCD_HEIGHT);
+  gfx->draw16bitRGBBitmap(
+      PET_X, PET_Y, frame_buffer, PET_WIDTH, PET_HEIGHT);
+  const uint32_t elapsed = millis() - started_at;
+  if (elapsed > 250) {
+    Serial.printf("[PET] slow frame=%lu ms\n", static_cast<unsigned long>(elapsed));
+  }
   return true;
 }
 
 void setup() {
-  Serial.begin(115200);
+  Serial.begin(921600);
   delay(100);
   Serial.println("TopPet multi-expression firmware starting");
 
@@ -880,20 +1967,22 @@ void setup() {
   gfx->fillScreen(COLOR_BLACK);
 
   frame_buffer = static_cast<uint16_t *>(heap_caps_malloc(
-      LCD_WIDTH * LCD_HEIGHT * sizeof(uint16_t),
+      PET_WIDTH * PET_HEIGHT * sizeof(uint16_t),
+      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  bubble_buffer = static_cast<uint16_t *>(heap_caps_malloc(
+      BUBBLE_BUFFER_PIXELS * sizeof(uint16_t),
       MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   text_mask = static_cast<uint8_t *>(heap_caps_malloc(
       TEXT_MASK_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  subtitle_encoded_buffer = static_cast<uint8_t *>(heap_caps_malloc(
+      SUBTITLE_ENCODED_BUFFER_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  network_response_buffer = static_cast<uint8_t *>(heap_caps_malloc(
+      NETWORK_RESPONSE_BUFFER_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
   rle_buffer = static_cast<uint8_t *>(heap_caps_malloc(
       RLE_BUFFER_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
-  if (!frame_buffer || !text_mask || !rle_buffer) {
+  if (!frame_buffer || !bubble_buffer || !text_mask ||
+      !subtitle_encoded_buffer || !network_response_buffer || !rle_buffer) {
     showFatalError("Memory allocation failed");
-  }
-
-  recording_buffer = static_cast<int16_t *>(heap_caps_malloc(
-      AUDIO_MAX_RECORDING_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-  if (!recording_buffer) {
-    showFatalError("Audio buffer allocation failed");
   }
 
   if (!LittleFS.begin(false)) {
@@ -910,39 +1999,15 @@ void setup() {
   if (!loadExpression(0) || !renderCurrentFrame()) {
     showFatalError("Expression load failed");
   }
+  if (!drawSpeechBubble()) {
+    showFatalError("Initial subtitle failed");
+  }
+  // No task may touch I2S, LittleFS, display, or shared queues until the
+  // single-threaded hardware/bootstrap rendering above is fully complete.
+  createVoiceTasks();
 }
 
 void loop() {
-  const uint32_t started_at = millis();
   serviceProvisioningPortal();
-  updateUserButton();
-  serviceRecording();
-  if (button_test_state == ButtonTestState::THINKING &&
-      millis() - button_thinking_started_at >= BUTTON_THINKING_PREVIEW_MS) {
-    setButtonTestState(ButtonTestState::IDLE);
-  }
-
-  // Keep the listening animation moving while the voice key is held.
-  // THINKING intentionally remains on its preview frame until the host
-  // responds, while IDLE and LISTENING advance through their frame timings.
-  if (button_test_state == ButtonTestState::IDLE ||
-      button_test_state == ButtonTestState::LISTENING) {
-    animation_frame = (animation_frame + 1) % asset_header.frame_count;
-  }
-
-  if (!renderCurrentFrame()) {
-    showFatalError("Expression decode failed");
-  }
-  const uint16_t duration = frame_entries[animation_frame].duration_ms;
-  const uint32_t render_time = millis() - started_at;
-  if (render_time < duration) {
-    const uint32_t frame_deadline = started_at + duration;
-    while (static_cast<int32_t>(millis() - frame_deadline) < 0) {
-      if (updateUserButton()) {
-        break;
-      }
-      serviceRecording();
-      delay(1);
-    }
-  }
+  delay(10);
 }

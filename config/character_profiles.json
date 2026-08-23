@@ -11,7 +11,7 @@
       "engine": "voxcpm",
       "voice": "laoshaozi-personal",
       "api_url": "http://127.0.0.1:9890",
-      "inference_steps": 4,
+      "inference_steps": 3,
       "timeout_seconds": 120,
       "fallback_voice": "yunxi",
       "optional_voxcpm": true
