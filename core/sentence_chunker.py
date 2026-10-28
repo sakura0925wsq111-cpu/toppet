@@ -39,10 +39,11 @@ class SentenceChunker:
     def feed(self, delta: str) -> list[str]:
         if not delta:
             return []
-        self._buffer += delta
         chunks: list[str] = []
-
-        while self._buffer:
+        # Process the same prefix at the same time regardless of transport delta
+        # boundaries. Otherwise a batched delta can bypass max_chars entirely.
+        for char in delta:
+            self._buffer += char
             terminator_index = self._find_usable_terminator()
             if terminator_index is not None:
                 chunks.append(self._take(terminator_index + 1))
@@ -56,8 +57,6 @@ class SentenceChunker:
             if len(self._buffer) >= self.max_chars:
                 chunks.append(self._take(self._forced_split_index()))
                 continue
-
-            break
 
         return chunks
 

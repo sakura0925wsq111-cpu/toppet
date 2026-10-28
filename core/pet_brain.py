@@ -186,6 +186,7 @@ class PetBrain:
 5) 当用户问食物热量，优先用 EATING 或 THINKING。
 6) 当用户累、压力大或崩溃时，优先用 TIRED、SAD、LISTENING 或 HEART。
 7) 禁止输出任何额外文本（比如 Markdown、解释、前后缀）。
+8) 禁止用任何括号描述肢体动作、表情或舞台提示，只输出实际要说的话。
 """.strip()
 
     def process(self, user_text: str) -> AIReply:

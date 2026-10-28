@@ -1,4 +1,6 @@
 # TopPet
+> 2026-10-29：新增 [qq-bridge 实体硬件聊天接入](docs/qq-bridge-hardware-chat.md)。
+> `start-companion.ps1` 默认使用 qq-bridge 的绑定用户、人格与上下文；TopPet 只负责录音、识别、声音、显示和设备协议，不运行独立聊天大脑。本文其余实测数据保留为原有系统的历史基线。
 
 **ESP32-S3 实体 AI 桌宠：一个可打断、可观测、可实测的端到端流式语音系统。**
 

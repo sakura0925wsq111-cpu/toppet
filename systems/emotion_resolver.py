@@ -191,7 +191,8 @@ class EmotionResolver:
     ) -> None:
         """Update per-conversation praise state for a new user turn."""
         now = now or datetime.now()
-        if not self._matches(user_text, self._re_praise):
+        praise_text = re.sub(r"不(?:再)?喜欢|不爱", "", user_text)
+        if not self._matches(praise_text, self._re_praise):
             return
         if self.last_praise_at is None:
             self.praise_streak = 1
@@ -251,6 +252,8 @@ class EmotionResolver:
     ) -> list[EmotionCandidate]:
         """Build candidates from text, conversation state, time, and the model."""
         text = f"{user_text}\n{assistant_text}"
+        text = re.sub(r"(?:没(?:有)?|未|不)(?:能)?(?:通过|成功|完成)|不(?:再)?喜欢|不爱", "", text)
+        user_text = re.sub(r"不(?:再)?喜欢|不爱", "", user_text)
         candidates: list[EmotionCandidate] = []
 
         if self._matches(user_text, self._re_bedtime):

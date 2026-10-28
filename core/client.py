@@ -28,11 +28,100 @@ import requests
 from openai import OpenAI
 
 from .config import WEEKDAY_NAMES, WEATHER_KEYWORDS
+from .dialogue_policy import is_weather_request, is_time_request
 
 logger = logging.getLogger(__name__)
 
 # 从 emotion_scheduler 导入情绪相关常量
 # 注意：避免循环导入，只在需要时延迟导入
+
+
+_ACTION_CUE_RE = re.compile(
+    r"(?:"
+    r"抱|抱住|拥抱|摸|摸头|拍|拍拍|揉|揉揉|亲|亲亲|蹭|"
+    r"挥手|招手|点头|摇头|眨眼|闭眼|睁眼|歪头|抬头|低头|"
+    r"叹气|叹了口气|笑|微笑|坏笑|偷笑|大笑|哭|流泪|脸红|"
+    r"鼓掌|比心|叉腰|摊手|耸肩|挠头|托腮|转身|靠近|坐下|"
+    r"站起|跳|转圈|伸懒腰|打哈欠|沉默|思考|假装|看着|望着|"
+    r"hugs?|smiles?|laughs?|sighs?|nods?|waves?|cries?"
+    r")",
+    flags=re.IGNORECASE,
+)
+_FACTUAL_PARENTHETICAL_RE = re.compile(
+    r"[0-9=+*/%℃]|(?:是指|也就是|即|例如|比如|因为|所以|但是|"
+    r"或者|以及|包括|简称|版本|时间)"
+)
+
+
+def _is_parenthetical_action(text: str) -> bool:
+    """Return whether short parenthetical text is an action/stage direction."""
+    cue = text.strip()
+    if not cue or len(cue) > 40 or "\n" in cue:
+        return False
+    if _FACTUAL_PARENTHETICAL_RE.search(cue):
+        return False
+    return _ACTION_CUE_RE.search(cue) is not None
+
+
+class _ParentheticalActionFilter:
+    """Remove action cues without exposing partial cues during streaming."""
+
+    _CLOSERS = {"（": "）", "(": ")"}
+
+    def __init__(self):
+        self._pending = ""
+        self._closer = ""
+        self._depth = 0
+        self._drop_following_space = False
+
+    def feed(self, text: str) -> str:
+        output: list[str] = []
+        for char in text:
+            if self._pending:
+                self._pending += char
+                if char == self._pending[0]:
+                    self._depth += 1
+                elif char == self._closer:
+                    self._depth -= 1
+                    if self._depth == 0:
+                        candidate = self._pending
+                        self._pending = ""
+                        if _is_parenthetical_action(candidate[1:-1]):
+                            self._drop_following_space = True
+                        else:
+                            output.append(candidate)
+                elif len(self._pending) > 160:
+                    output.append(self._pending)
+                    self._pending = ""
+                    self._depth = 0
+                continue
+
+            if char in self._CLOSERS:
+                self._pending = char
+                self._closer = self._CLOSERS[char]
+                self._depth = 1
+                continue
+
+            if self._drop_following_space and char.isspace():
+                continue
+            self._drop_following_space = False
+            output.append(char)
+        return "".join(output)
+
+    def finish(self) -> str:
+        pending = self._pending
+        self._pending = ""
+        self._closer = ""
+        self._depth = 0
+        if pending and _is_parenthetical_action(pending[1:]):
+            return ""
+        return pending
+
+
+def strip_parenthetical_actions(text: str) -> str:
+    """Strip parenthesized action cues while preserving factual parentheses."""
+    action_filter = _ParentheticalActionFilter()
+    return action_filter.feed(text or "") + action_filter.finish()
 
 
 # =============================================================================
@@ -110,6 +199,7 @@ class StreamingReplyParser:
         self._header_done = False
         self.emotion = "NEUTRAL"
         self.content_parts: list[str] = []
+        self._action_filter = _ParentheticalActionFilter()
 
     @property
     def content(self) -> str:
@@ -139,20 +229,20 @@ class StreamingReplyParser:
             self._emit_content(remainder)
 
     def finish(self) -> None:
-        if self._header_done:
-            return
-        # A non-conforming model may omit the emotion line. Treat its buffered
-        # output as content rather than dropping a useful partial response.
-        buffered = self._header
-        self._header = ""
-        raw = buffered.strip().strip("`#* ")
-        normalized = AIClient.normalize_emotion(raw)
-        if raw and (normalized != "NEUTRAL" or raw.upper() == "NEUTRAL"):
-            self._finish_header(buffered)
-            return
-        self._finish_header("NEUTRAL")
-        if buffered:
-            self._emit_content(buffered)
+        if not self._header_done:
+            # A non-conforming model may omit the emotion line. Treat its buffered
+            # output as content rather than dropping a useful partial response.
+            buffered = self._header
+            self._header = ""
+            raw = buffered.strip().strip("`#* ")
+            normalized = AIClient.normalize_emotion(raw)
+            if raw and (normalized != "NEUTRAL" or raw.upper() == "NEUTRAL"):
+                self._finish_header(buffered)
+            else:
+                self._finish_header("NEUTRAL")
+                if buffered:
+                    self._emit_content(buffered)
+        self._emit_filtered_content(self._action_filter.finish())
 
     def _finish_header(self, raw_header: str) -> None:
         cleaned = raw_header.strip().strip("`#* ")
@@ -164,6 +254,11 @@ class StreamingReplyParser:
             self._on_emotion(self.emotion)
 
     def _emit_content(self, text: str) -> None:
+        self._emit_filtered_content(self._action_filter.feed(text))
+
+    def _emit_filtered_content(self, text: str) -> None:
+        if not text:
+            return
         self.content_parts.append(text)
         if self._on_text_delta is not None:
             self._on_text_delta(text)
@@ -195,6 +290,7 @@ class AIClient:
         temperature: float = 0.9,
         max_tokens: int = 260,
         user_address: str = "用户",
+        request_timeout: float = 20.0,
     ):
         """初始化 AI 客户端。
 
@@ -215,7 +311,7 @@ class AIClient:
         # 如果没有 API Key，client 为 None
         # 此时只能处理本地查询（天气/时间），无法进行 AI 对话
         self._client: OpenAI | None = (
-            OpenAI(api_key=api_key, base_url=base_url)
+            OpenAI(api_key=api_key, base_url=base_url, timeout=request_timeout, max_retries=0)
             if api_key
             else None
         )
@@ -283,6 +379,7 @@ class AIClient:
         on_emotion: Callable[[str], None] | None = None,
         on_text_delta: Callable[[str], None] | None = None,
         cancel_event: threading.Event | StreamCancelToken | None = None,
+        max_tokens: int | None = None,
     ) -> AIReply:
         """Stream an ``EMOTION\ncontent`` reply through lightweight callbacks.
 
@@ -322,7 +419,7 @@ class AIClient:
                 model=self.model,
                 messages=messages,
                 temperature=self.temperature,
-                max_tokens=self.max_tokens,
+                max_tokens=max_tokens if max_tokens is not None else self.max_tokens,
                 stream=True,
             )
             attach = getattr(cancel_event, "attach", None)
@@ -364,15 +461,18 @@ class AIClient:
                 return fallback
         except StreamCancelled:
             raise
-        except Exception:
+        except Exception as exc:
+            if getattr(exc, "status_code", None) in {401, 403, 429}:
+                # A format fallback cannot repair credentials, permission or quota.
+                raise
             if parser.has_content:
                 parser.finish()
-                logger.exception(
-                    "LLM stream interrupted after useful content; keeping partial reply"
+                logger.warning(
+                    "LLM stream interrupted after useful content (%s); keeping partial reply", type(exc).__name__
                 )
             else:
-                logger.exception(
-                    "LLM stream failed before content; falling back to JSON request"
+                logger.warning(
+                    "LLM stream failed before content (%s); falling back to JSON request", type(exc).__name__
                 )
                 fallback = self.process(
                     user_text,
@@ -391,6 +491,7 @@ class AIClient:
             detach = getattr(cancel_event, "detach", None)
             if callable(detach) and stream is not None:
                 detach(stream)
+            StreamCancelToken._close(stream)
 
         normalized = self.normalize_ai_reply(
             {"emotion": parser.emotion, "content": parser.content}
@@ -460,7 +561,15 @@ class AIClient:
 
         # 历史对话
         if conversation_history:
-            messages.extend(conversation_history)
+            for message in conversation_history:
+                copied = dict(message)
+                if copied.get("role") == "assistant":
+                    copied["content"] = strip_parenthetical_actions(
+                        str(copied.get("content", ""))
+                    ).strip()
+                    if not copied["content"]:
+                        continue
+                messages.append(copied)
 
         # 当前用户输入
         messages.append({"role": "user", "content": user_text})
@@ -530,6 +639,7 @@ class AIClient:
         temperature: float | None = None,
         max_tokens: int | None = None,
         timeout: float | None = None,
+        raise_errors: bool = False,
     ) -> str:
         """Simple chat completion - direct API call returning plain text.
 
@@ -542,10 +652,12 @@ class AIClient:
             max_tokens: Override max tokens, None uses instance default.
 
         Returns:
-            Raw text response from the model; empty string on failure or
-            when no API Key is configured.
+            Raw text response from the model. By default failures return an
+            empty string; durable background jobs can request exceptions.
         """
         if self._client is None:
+            if raise_errors:
+                raise RuntimeError("AI client is not configured")
             return ""
 
         try:
@@ -563,6 +675,8 @@ class AIClient:
             )
             return completion.choices[0].message.content or ""
         except Exception:
+            if raise_errors:
+                raise
             return ""
 
     @staticmethod
@@ -571,20 +685,12 @@ class AIClient:
 
         命中后直接走实时天气接口，不再让模型瞎猜。
         """
-        lowered = text.lower()
-        return any(keyword in lowered for keyword in WEATHER_KEYWORDS)
+        return is_weather_request(text)
 
     @staticmethod
     def is_time_question(text: str) -> bool:
         """判断用户是否在问当前时间或日期。"""
-        lowered = text.lower()
-        patterns = [
-            r"(几点|几号|星期几|礼拜几|周几)",
-            r"(现在|当前).*(时间|几点|日期)",
-            r"(今天|明天|后天).*(日期|几号|星期|周几|礼拜)",
-            r"\b(time|date)\b",
-        ]
-        return any(re.search(pattern, lowered) for pattern in patterns)
+        return is_time_request(text)
 
     @staticmethod
     def get_system_time() -> str:
@@ -735,7 +841,9 @@ class AIClient:
         if emotion not in valid_emotions:
             emotion = "NEUTRAL"
 
-        content = str(data.get("content", "")).strip()
+        content = strip_parenthetical_actions(
+            str(data.get("content", ""))
+        ).strip()
         if not content:
             content = (
                 f"{fallback_address.strip() or '用户'}，"

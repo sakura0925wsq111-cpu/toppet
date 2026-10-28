@@ -112,10 +112,19 @@ class FasterWhisperEngine(ASREngine):
     def _transcribe_source(self, source: str | np.ndarray) -> str:
         if self._model is None:
             self._load_model()
+        short = isinstance(source, np.ndarray) and source.size < 32000
+        if short:
+            # Push-to-talk clips can end immediately after a short syllable.
+            # Supply decoder context with silence, not an additional VAD gate.
+            source = np.pad(source, (1280, 5120))
         segments, _info = self._model.transcribe(
             source,
             language=self._language if self._language != "auto" else None,
-            beam_size=1,
+            beam_size=3 if short else 1,
+            temperature=0.0,
+            condition_on_previous_text=False,
+            initial_prompt="中文口语对话。专有词：QQ、大肥鱼、桌宠。",
+            max_new_tokens=32 if short else 160,
             # GPIO18 already supplies an exact push-to-talk boundary. A
             # second VAD pass can erase quiet short Chinese syllables from the
             # board microphone and adds latency, so the hardware path decodes

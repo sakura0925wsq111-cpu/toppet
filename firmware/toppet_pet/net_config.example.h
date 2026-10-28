@@ -1,5 +1,9 @@
 #pragma once
 
+// Optional: set a new revision to apply compiled network settings once,
+// replacing previously saved settings. Later portal edits remain effective.
+// #define TOPPET_NETWORK_CONFIG_REVISION 20261029
+
 // Copy this file to net_config.h and replace the placeholders locally.
 #define TOPPET_WIFI_SSID "YOUR_2_4GHZ_WIFI_NAME"
 #define TOPPET_WIFI_PASSWORD "YOUR_WIFI_PASSWORD"

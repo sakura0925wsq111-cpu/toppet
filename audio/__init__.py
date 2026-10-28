@@ -12,31 +12,23 @@ DesktopPet 只需 import 本模块即可使用全部语音能力。
     player.py   — 音频播放器
 """
 
-# ── TTS ──
-from .tts import (
-    SoVITSTTSEngine,
-    create_sovits_tts,
-    TTSEngine,
-    EdgeTTSEngine,
-    EDGE_VOICES,
-    create_edge_tts,
-    TTSManager,
-    TTSWorker,
-    VoxCPMTTSEngine,
-    FallbackTTSEngine,
-)
+from importlib import import_module
 
-# ── ASR ──
-from .asr import (
-    ASREngine,
-    FasterWhisperEngine,
-    ASRManager,
-    WhisperWorker,
-)
 
-# ── 录音 & 播放 ──
-from .recorder import VoiceRecorder
-from .player import AudioPlayer
+def __getattr__(name):
+    # Preserve desktop exports while allowing pure engines to run without Qt,
+    # microphone drivers, or the desktop player being imported as side effects.
+    if name in {"VoiceRecorder", "AudioPlayer"}:
+        module = ".recorder" if name == "VoiceRecorder" else ".player"
+    elif name in {"ASREngine", "FasterWhisperEngine", "ASRManager", "WhisperWorker"}:
+        module = ".asr"
+    elif name in __all__:
+        module = ".tts"
+    else:
+        raise AttributeError(name)
+    value = getattr(import_module(module, __name__), name)
+    globals()[name] = value
+    return value
 
 
 __all__ = [

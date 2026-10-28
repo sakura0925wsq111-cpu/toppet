@@ -24,7 +24,10 @@ import uvicorn
 from core.config import PetConfig
 
 from .pipeline import HostPipeline, PipelineCancelled
+from .hardware_control import DeviceLink, HardwareControl, install_control_routes
 from .voxcpm_service import VoxCPMServiceController, VoxCPMStartupError
+from .qwen_service import QwenServiceController
+from audio.tts.qwen_engine import resolve_tts_config
 
 logger = logging.getLogger("toppet.host_service")
 
@@ -45,6 +48,7 @@ def create_app(
     voxcpm_service: VoxCPMServiceController | None = None,
 ) -> FastAPI:
     service = pipeline or HostPipeline.from_config()
+    hardware = HardwareControl(service.tts_engine)
     voice_service = voxcpm_service
     autostart_voxcpm = os.getenv("TOPPET_VOXCPM_AUTOSTART", "1").lower() not in {
         "0",
@@ -55,6 +59,10 @@ def create_app(
         voice_service = VoxCPMServiceController(
             max_wait=float(os.getenv("TOPPET_VOXCPM_STARTUP_TIMEOUT", "180"))
         )
+    if voice_service is None and service.requires_qwen:
+        manager = getattr(service, "character_manager", None) or service.brain.character_manager
+        profile = manager.get_profile(service.character_id)
+        voice_service = QwenServiceController(resolve_tts_config(profile))
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -64,11 +72,12 @@ def create_app(
                     await asyncio.to_thread(voice_service.start_and_wait)
                 except VoxCPMStartupError:
                     logger.exception(
-                        "Automatic VoxCPM2 startup failed; EdgeTTS fallback remains available"
+                        "Automatic VoxCPM2 startup failed; cloned speech remains unavailable and no substitute voice will be used"
                     )
             await asyncio.to_thread(service.preload)
             yield
         finally:
+            await hardware.close()
             service.close()
             if voice_service is not None:
                 await asyncio.to_thread(voice_service.stop)
@@ -79,6 +88,8 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.pipeline = service
+    app.state.hardware = hardware
+    install_control_routes(app, hardware)
 
     @app.get("/health")
     async def health() -> dict[str, object]:
@@ -89,6 +100,7 @@ def create_app(
             "character_id": service.character_id,
             "asr": service.asr_name,
             "tts": service.tts_name,
+            "chat_backend": getattr(service, "chat_backend", "petbrain"),
         }
 
     @app.get("/api/v1/info")
@@ -192,7 +204,7 @@ def create_app(
                 command.get("type") == "hello"
                 and command.get("protocol") == "toppet-host/v2"
             ):
-                await _handle_v2_websocket(websocket, service, command)
+                await _handle_v2_websocket(websocket, service, command, hardware)
             else:
                 await _handle_v1_websocket(websocket, service, first)
         except Exception as exc:
@@ -302,6 +314,7 @@ async def _handle_v2_websocket(
     websocket: WebSocket,
     service: HostPipeline,
     hello: dict[str, Any],
+    hardware: HardwareControl | None = None,
 ) -> None:
     """Long-lived v2 connection with framed microphone and TTS PCM."""
     device_id = str(hello.get("device_id", "top-pet-unknown"))[:128]
@@ -330,6 +343,38 @@ async def _handle_v2_websocket(
         async with send_lock:
             await websocket.send_json(message)
 
+    def activate_control(session_id):
+        nonlocal active_session
+        if active_session is not None:
+            return False
+        active_session = session_id
+        return True
+
+    def release_control(session_id):
+        nonlocal active_session
+        if active_session == session_id:
+            active_session = None
+
+    async def send_control_audio(session_id, chunk):
+        async with send_lock:
+            if active_session != session_id:
+                raise InterruptedError("device session changed")
+            await websocket.send_json({
+                "type": "tts_audio", "session_id": session_id,
+                "sequence": chunk.sequence, "bytes": len(chunk.pcm),
+                "is_final": chunk.is_final, "buffer_bytes": 0,
+            })
+            await websocket.send_bytes(chunk.pcm)
+
+    control_link = DeviceLink(
+        device_id, "remote_control_v1" in hello.get("capabilities", []),
+        send_json, send_control_audio, activate_control, release_control,
+        resume_input=lambda session_id: active_session == session_id
+            and getattr(service, "chat_backend", "") == "qq-bridge" and service.input_ready(session_id),
+    )
+    if hardware is not None:
+        hardware.attach(control_link)
+
     await send_json({
         "type": "hello_ack",
         "protocol": "toppet-host/v2",
@@ -350,6 +395,7 @@ async def _handle_v2_websocket(
     async def run_pipeline(session_id: str, pcm: bytes) -> None:
         nonlocal active_session
         first_audio_sent = False
+        pipeline_ok = False
 
         async def emit(event: dict[str, object]) -> None:
             if active_session != session_id:
@@ -390,6 +436,7 @@ async def _handle_v2_websocket(
                 emit=emit,
                 send_audio=send_audio,
             )
+            pipeline_ok = True
         except PipelineCancelled:
             if active_session == session_id:
                 await send_json({"type": "cancelled", "session_id": session_id})
@@ -412,6 +459,9 @@ async def _handle_v2_websocket(
                 })
         finally:
             if active_session == session_id:
+                if not pipeline_ok:
+                    control_link.legacy_busy = False
+                    control_link.legacy_session = None
                 active_session = None
 
     try:
@@ -460,6 +510,10 @@ async def _handle_v2_websocket(
                 continue
             command = _json_message(message["text"])
             command_type = command.get("type")
+            if hardware is not None:
+                hardware.event(control_link, command)
+            if command_type == "control_ready":
+                continue
             if command_type == "listen_start":
                 old_session = cancel_active()
                 if old_session is not None:
@@ -542,6 +596,31 @@ async def _handle_v2_websocket(
                     pcm_chunks.clear()
                     pending_frame = None
                 await send_json({"type": "cancelled", "session_id": session_id})
+            elif command_type == "latency":
+                session_id = str(command.get("session_id", "")).strip()[:128]
+                node = str(command.get("node", "")).strip()[:64]
+                allowed_nodes = {
+                    "button_pressed",
+                    "button_released",
+                    "first_mic_frame_sent",
+                    "last_mic_frame_sent",
+                    "first_tts_frame_received",
+                    "first_i2s_write",
+                    "playback_underrun",
+                    "playback_rebuffer_started",
+                    "playback_rebuffer_finished",
+                    "playback_finished",
+                }
+                if session_id and node in allowed_nodes:
+                    raw_duration = int(command.get("duration_ms", 0))
+                    service.latency.record(
+                        node,
+                        session_id=session_id,
+                        device_id=device_id,
+                        duration_ms=raw_duration if raw_duration > 0 else None,
+                        sequence=max(0, int(command.get("sequence", 0))),
+                        buffer_bytes=int(command.get("buffer_bytes", 0)),
+                    )
             elif command_type == "ping":
                 await send_json({"type": "pong", "session_id": active_session or ""})
             elif command_type != "hello":
@@ -552,6 +631,8 @@ async def _handle_v2_websocket(
                     "message": str(command_type),
                 })
     finally:
+        if hardware is not None:
+            hardware.detach(control_link)
         cancel_active()
         if processing_tasks:
             await asyncio.gather(*processing_tasks, return_exceptions=True)
@@ -581,19 +662,21 @@ def main() -> None:
     parser.add_argument("--asr-model", default="base")
     parser.add_argument("--asr-device", default="cpu")
     parser.add_argument("--asr-compute-type", default="int8")
+    parser.add_argument("--chat-backend", choices=["qq-bridge", "petbrain"], default=os.getenv("TOPPET_CHAT_BACKEND", "qq-bridge"))
+    parser.add_argument("--bridge-config", default=os.getenv("TOPPET_BRIDGE_CONFIG"))
     args = parser.parse_args()
 
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
-    pipeline = HostPipeline.from_config(
-        PetConfig(),
-        character_id=args.character,
-        asr_model=args.asr_model,
-        asr_device=args.asr_device,
-        asr_compute_type=args.asr_compute_type,
-    )
+    if args.chat_backend == "qq-bridge":
+        from .bridge_pipeline import BridgePipeline
+        pipeline = BridgePipeline.from_bridge_config(args.bridge_config, character_id=args.character,
+            asr_model=args.asr_model, asr_device=args.asr_device, asr_compute_type=args.asr_compute_type)
+    else:
+        pipeline = HostPipeline.from_config(PetConfig(), character_id=args.character,
+            asr_model=args.asr_model, asr_device=args.asr_device, asr_compute_type=args.asr_compute_type)
     app = create_app(pipeline)
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 

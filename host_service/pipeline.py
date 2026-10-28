@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import itertools
 import logging
 import os
 import tempfile
@@ -18,6 +19,7 @@ from audio.asr.whisper_asr import FasterWhisperEngine
 from audio.tts.base_tts import TTSEngine
 from audio.tts.edge_tts_engine import EDGE_VOICES, EdgeTTSEngine
 from audio.tts.voxcpm_engine import AudioChunk, FallbackTTSEngine, VoxCPMTTSEngine
+from audio.tts.qwen_engine import QwenTTSEngine, resolve_tts_config
 from core.config import PetConfig
 from core.client import StreamCancelled
 from core.pet_brain import PetBrain
@@ -31,7 +33,9 @@ from .audio import (
     validate_audio_parameters,
 )
 from .latency import LatencyTracker
-from .subtitle import build_subtitle_event
+from .subtitle import build_response_ui_event, build_subtitle_event
+from .playback_windows import (PlaybackWindowWriter, DEFAULT_WINDOW_BYTES,
+                               DEFAULT_INITIAL_WINDOW_BYTES, validate_window_bytes)
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +76,10 @@ class HostPipeline:
         character_id: str = DEFAULT_CHARACTER,
         emotion_resolver: EmotionResolver | None = None,
         latency: LatencyTracker | None = None,
+        sentence_pause_frames: int = 4,
+        safe_tts_prefix_bytes: int | None = None,
+        playback_window_bytes: int | None = DEFAULT_WINDOW_BYTES,
+        initial_playback_window_bytes: int | None = DEFAULT_INITIAL_WINDOW_BYTES,
     ) -> None:
         self.brain = brain
         self.asr_engine = asr_engine
@@ -79,6 +87,25 @@ class HostPipeline:
         self.character_id = character_id
         self.emotion_resolver = emotion_resolver or EmotionResolver()
         self.latency = latency or LatencyTracker()
+        self.sentence_pause_frames = max(0, int(sentence_pause_frames))
+        if safe_tts_prefix_bytes is not None and (
+            isinstance(safe_tts_prefix_bytes, bool)
+            or not isinstance(safe_tts_prefix_bytes, int)
+            or safe_tts_prefix_bytes <= 0
+            or safe_tts_prefix_bytes % 2
+        ):
+            raise ValueError("safe_tts_prefix_bytes must be a positive even integer or None")
+        # Keep the old PCM-only prefix experiment separate from accurately
+        # declared playback windows. playback_window_bytes=None is the legacy path.
+        self.safe_tts_prefix_bytes = safe_tts_prefix_bytes
+        if playback_window_bytes is not None:
+            validate_window_bytes(playback_window_bytes)
+            if initial_playback_window_bytes is not None:
+                validate_window_bytes(initial_playback_window_bytes)
+                if initial_playback_window_bytes < playback_window_bytes:
+                    raise ValueError("initial playback unit must be at least the steady window size")
+        self.playback_window_bytes = playback_window_bytes
+        self.initial_playback_window_bytes = initial_playback_window_bytes
         self._lock = asyncio.Lock()
         self._active_cancellations: dict[str, threading.Event] = {}
         self._cancellation_lock = threading.Lock()
@@ -96,21 +123,37 @@ class HostPipeline:
         config = config or PetConfig()
         brain = PetBrain(config, character=character_id)
         profile = brain.character_manager.get_profile(character_id)
-        tts_config = profile.get("tts", {})
+        tts_config = resolve_tts_config(profile)
         edge_voice_key = tts_config.get(
             "fallback_voice", tts_config.get("voice", "yunxi")
         )
         edge_voice = EDGE_VOICES.get(edge_voice_key, edge_voice_key)
         edge_engine = EdgeTTSEngine(voice=edge_voice)
 
-        if tts_config.get("engine") == "voxcpm":
+        if tts_config.get("engine") == "qwen":
+            tts_engine = QwenTTSEngine(
+                api_url=tts_config.get("api_url", "http://127.0.0.1:9891"),
+                timeout=float(tts_config.get("timeout_seconds", 180)),
+                voice_id=str(tts_config.get("voice", "qwen-user-20261028")),
+                runtime=tts_config.get("qwen_runtime", "baseline"),
+            )
+        elif tts_config.get("engine") == "voxcpm":
             primary = VoxCPMTTSEngine(
                 api_url=tts_config.get("api_url", "http://127.0.0.1:9890"),
                 inference_steps=int(tts_config.get("inference_steps", 4)),
                 timeout=float(tts_config.get("timeout_seconds", 120)),
                 voice_id=str(tts_config.get("voice", "laoshaozi-personal")),
+                # Keep the configured voice baseline fixed during host playback;
+                # candidate comparisons belong in the benchmark, not a user turn.
+                adaptive_steps=(int(tts_config.get("inference_steps", 4)),),
+                buffer_rtf_threshold=float(
+                    tts_config.get("buffer_rtf_threshold", 0.95)
+                ),
             )
-            tts_engine: TTSEngine = FallbackTTSEngine(primary, edge_engine)
+            if bool(tts_config.get("allow_voice_fallback", True)):
+                tts_engine: TTSEngine = FallbackTTSEngine(primary, edge_engine)
+            else:
+                tts_engine = primary
         else:
             tts_engine = edge_engine
 
@@ -119,11 +162,17 @@ class HostPipeline:
             device=asr_device,
             compute_type=asr_compute_type,
         )
+        fast_qwen = tts_config.get("engine") == "qwen" and tts_config.get("qwen_runtime") == "fast"
+        default_window = 20480 if fast_qwen else DEFAULT_WINDOW_BYTES
+        default_initial_window = 20480 if fast_qwen else DEFAULT_INITIAL_WINDOW_BYTES
         return cls(
             brain,
             asr_engine,
             tts_engine,
             character_id=character_id,
+            sentence_pause_frames=int(tts_config.get("sentence_pause_frames", 4)),
+            playback_window_bytes=tts_config.get("playback_window_bytes", default_window),
+            initial_playback_window_bytes=tts_config.get("initial_playback_window_bytes", default_initial_window),
         )
 
     @property
@@ -135,7 +184,13 @@ class HostPipeline:
         return self.tts_engine.engine_name
 
     @property
+    def requires_qwen(self) -> bool:
+        return isinstance(self.tts_engine, QwenTTSEngine)
+
+    @property
     def requires_voxcpm(self) -> bool:
+        if isinstance(self.tts_engine, VoxCPMTTSEngine):
+            return True
         return isinstance(self.tts_engine, FallbackTTSEngine) and isinstance(
             self.tts_engine.primary, VoxCPMTTSEngine
         )
@@ -286,6 +341,10 @@ class HostPipeline:
     ) -> PipelineResult:
         """Run ASR/LLM/TTS as a sentence and PCM streaming pipeline."""
         validate_audio_parameters(sample_rate, channels, bits_per_sample)
+        if self.safe_tts_prefix_bytes is not None and emit is not None:
+            raise ValueError(
+                "safe-prefix requires a PCM-only sink without ready-length records; use playback windows for device events"
+            )
         if not pcm or len(pcm) % 2:
             raise ValueError("PCM payload is empty or ends on a partial sample")
         cancel_event = self.session_cancel_event(session_id)
@@ -320,7 +379,7 @@ class HostPipeline:
                 loop = asyncio.get_running_loop()
                 sentence_queue: asyncio.Queue[str | object] = asyncio.Queue()
                 sentinel = object()
-                chunker = SentenceChunker(min_chars=4, max_chars=18, comma_chars=10)
+                chunker = SentenceChunker(min_chars=4, max_chars=14, comma_chars=8)
                 callback_state: dict[str, object] = {
                     "first_token": False,
                     "first_sentence": False,
@@ -363,9 +422,6 @@ class HostPipeline:
                     if cancel_event.is_set():
                         return
                     callback_state["emotion"] = emotion
-                    asyncio.run_coroutine_threadsafe(
-                        event("emotion", emotion=emotion), loop
-                    )
 
                 def run_llm():
                     try:
@@ -384,6 +440,15 @@ class HostPipeline:
                 tts_started: float | None = None
                 tts_sequence = [0]
                 first_tts_chunk = [False]
+                def on_first_audio(sequence):
+                    first_tts_chunk[0] = True
+                    self.latency.record("tts_first_chunk", session_id=session_id,
+                                        device_id=device_id, started_at=tts_started, sequence=sequence)
+                writer = PlaybackWindowWriter(
+                    window_bytes=self.playback_window_bytes, emit=event, send_audio=send_audio,
+                    check_cancel=lambda: self._check_cancel(cancel_event), on_first_audio=on_first_audio,
+                    initial_window_bytes=self.initial_playback_window_bytes,
+                ) if self.playback_window_bytes is not None and self.safe_tts_prefix_bytes is None else None
                 try:
                     while True:
                         sentence = await sentence_queue.get()
@@ -405,6 +470,16 @@ class HostPipeline:
                                 bits_per_sample=16,
                             )
                         sentence_text = str(sentence)
+                        if writer is not None:
+                            writer.begin_sentence(sentence_text, str(callback_state["emotion"] or "NEUTRAL"))
+                            await asyncio.to_thread(self._stream_sentence_to_writer,
+                                                    sentence_text, cancel_event, loop, writer)
+                            # Preserve the existing configured pauses; do not add
+                            # silence to conceal transport starvation.
+                            for _ in range(self.sentence_pause_frames):
+                                await writer.write(bytes(640))
+                            writer.end_sentence(sentence_text)
+                            continue
                         sentence_start_sequence = tts_sequence[0]
                         await event(
                             "tts_sentence_start",
@@ -412,7 +487,12 @@ class HostPipeline:
                             sequence=sentence_start_sequence,
                         )
                         await event(
-                            "subtitle", **build_subtitle_event(sentence_text)
+                            "response_ui",
+                            **build_response_ui_event(
+                                sentence_text,
+                                str(callback_state["emotion"] or "NEUTRAL"),
+                                sentence_start_sequence,
+                            ),
                         )
                         await asyncio.to_thread(
                             self._stream_sentence_to_sink,
@@ -425,6 +505,14 @@ class HostPipeline:
                             tts_sequence,
                             first_tts_chunk,
                             tts_started,
+                            (lambda byte_count: asyncio.run_coroutine_threadsafe(
+                                event(
+                                    "tts_sentence_ready",
+                                    sequence=sentence_start_sequence,
+                                    bytes=byte_count,
+                                ),
+                                loop,
+                            ).result()) if emit is not None else None,
                         )
                         # Preserve a natural punctuation pause while the
                         # single-GPU VoxCPM service starts the next sentence.
@@ -433,7 +521,7 @@ class HostPipeline:
                         # ring from hard-underrunning between model requests.
                         await asyncio.to_thread(
                             self._stream_silence_to_sink,
-                            12,  # 12 x 20 ms = 240 ms
+                            self.sentence_pause_frames,
                             cancel_event,
                             loop,
                             send_audio,
@@ -447,6 +535,9 @@ class HostPipeline:
                                 sentence_start_sequence, tts_sequence[0] - 1
                             ),
                         )
+                    if writer is not None:
+                        await writer.finish()
+                        tts_sequence[0] = writer.sequence
                     reply = await llm_task
                 except Exception:
                     cancel_event.set()
@@ -497,37 +588,98 @@ class HostPipeline:
         sequence: list[int],
         first_tts_chunk: list[bool],
         tts_started: float,
+        sentence_ready: Callable[[int], None] | None = None,
     ) -> None:
         synthesize_stream = getattr(self.tts_engine, "synthesize_stream", None)
         if not callable(synthesize_stream):
             raise RuntimeError("configured TTS engine does not support PCM streaming")
-        for source_chunk in synthesize_stream(
-            sentence, cancel_event=cancel_event
-        ):
+        if self.safe_tts_prefix_bytes is not None and sentence_ready is not None:
+            raise ValueError("a prefix cannot provide a complete-sentence byte manifest")
+        self._check_cancel(cancel_event)
+        source = iter(synthesize_stream(sentence, cancel_event=cancel_event))
+        try:
+            buffered: list[AudioChunk] = []
+            buffered_bytes = 0
+            while self.safe_tts_prefix_bytes is None or buffered_bytes < self.safe_tts_prefix_bytes:
+                self._check_cancel(cancel_event)
+                try:
+                    chunk = next(source)
+                except StopIteration:
+                    break
+                if chunk.pcm:
+                    buffered.append(chunk)
+                    buffered_bytes += len(chunk.pcm)
+            if not buffered:
+                raise RuntimeError("TTS stream returned no PCM")
             self._check_cancel(cancel_event)
-            if not source_chunk.pcm:
-                continue
-            chunk = AudioChunk(
-                pcm=source_chunk.pcm,
-                sample_rate=source_chunk.sample_rate,
-                channels=source_chunk.channels,
-                bits_per_sample=source_chunk.bits_per_sample,
-                sequence=sequence[0],
-                is_final=source_chunk.is_final,
+            if sentence_ready is not None:
+                sentence_ready(buffered_bytes)
+            logger.info(
+                "TTS buffering policy=%s bytes=%d chunks=%d",
+                "complete_sentence" if self.safe_tts_prefix_bytes is None else "bounded_prefix",
+                buffered_bytes, len(buffered),
             )
-            if not first_tts_chunk[0]:
-                first_tts_chunk[0] = True
-                self.latency.record(
-                    "tts_first_chunk",
-                    session_id=session_id,
-                    device_id=device_id,
-                    started_at=tts_started,
-                    sequence=chunk.sequence,
+            ordered = itertools.chain(buffered, source)
+            while True:
+                # Check before requesting the next block, including after sink cancellation.
+                self._check_cancel(cancel_event)
+                try:
+                    source_chunk = next(ordered)
+                except StopIteration:
+                    break
+                if not source_chunk.pcm:
+                    continue
+                chunk = AudioChunk(
+                    pcm=source_chunk.pcm,
+                    sample_rate=source_chunk.sample_rate,
+                    channels=source_chunk.channels,
+                    bits_per_sample=source_chunk.bits_per_sample,
+                    sequence=sequence[0],
+                    is_final=source_chunk.is_final,
                 )
-            if send_audio is not None:
-                future = asyncio.run_coroutine_threadsafe(send_audio(chunk), loop)
-                future.result()
-            sequence[0] += 1
+                if not first_tts_chunk[0]:
+                    first_tts_chunk[0] = True
+                    self.latency.record(
+                        "tts_first_chunk", session_id=session_id, device_id=device_id,
+                        started_at=tts_started, sequence=chunk.sequence,
+                    )
+                if send_audio is not None:
+                    asyncio.run_coroutine_threadsafe(send_audio(chunk), loop).result()
+                sequence[0] += 1
+        finally:
+            close = getattr(source, "close", None)
+            if callable(close):
+                close()
+
+    def _stream_sentence_to_writer(self, sentence, cancel_event, loop, writer):
+        synthesize_stream = getattr(self.tts_engine, "synthesize_stream", None)
+        if not callable(synthesize_stream):
+            raise RuntimeError("configured TTS engine does not support PCM streaming")
+        self._check_cancel(cancel_event)
+        source = iter(synthesize_stream(sentence, cancel_event=cancel_event))
+        seen = False
+        expected_sequence = 0
+        try:
+            while True:
+                self._check_cancel(cancel_event)
+                try:
+                    chunk = next(source)
+                except StopIteration:
+                    break
+                if not chunk.pcm:
+                    continue
+                if ((chunk.sample_rate, chunk.channels, chunk.bits_per_sample) != (16000, 1, 16)
+                        or len(chunk.pcm) % 2 or chunk.sequence != expected_sequence):
+                    raise ValueError("invalid TTS PCM format or sequence")
+                expected_sequence += 1
+                seen = True
+                asyncio.run_coroutine_threadsafe(writer.write(chunk.pcm), loop).result()
+            if not seen:
+                raise RuntimeError("TTS stream returned no PCM")
+        finally:
+            close = getattr(source, "close", None)
+            if callable(close):
+                close()
 
     @staticmethod
     def _stream_silence_to_sink(

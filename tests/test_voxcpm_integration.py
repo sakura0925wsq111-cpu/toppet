@@ -115,10 +115,14 @@ class VoxCPMEngineTests(unittest.TestCase):
 
 
 class VoxCPMRoleAndRuntimeTests(unittest.TestCase):
-    def test_only_personal_role_selects_voxcpm(self):
+    def test_personal_role_selects_qwen_and_keeps_voxcpm_available(self):
         profiles = json.loads(CHARACTER_PROFILES_FILE.read_text(encoding="utf-8"))
-        self.assertEqual(profiles["personal"]["tts"]["engine"], "voxcpm")
+        self.assertEqual(profiles["personal"]["tts"]["engine"], "qwen")
         self.assertTrue(profiles["personal"]["tts"]["optional_voxcpm"])
+        self.assertFalse(profiles["personal"]["tts"]["allow_voice_fallback"])
+        self.assertEqual(
+            profiles["personal"]["tts"]["adaptive_inference_steps"], [3, 4]
+        )
         self.assertEqual(profiles["shinchan"]["tts"]["engine"], "edge")
 
     def test_runtime_validation_rejects_missing_files(self):

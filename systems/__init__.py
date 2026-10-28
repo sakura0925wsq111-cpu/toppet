@@ -6,8 +6,15 @@ from .idle_scheduler import IdleAction, IdleScheduler, IDLE_ACTION_POOL, INACTIV
 from .expression_manager import ExpressionManager, EmotionMatcher
 from .emotion_resolver import EmotionResolver, EmotionResolution
 from .character_manager import CharacterManager, CHARACTER_DISPLAY_NAMES, VALID_CHARACTERS, DEFAULT_CHARACTER
-from .tts_service_manager import TTSServiceManager
-from .voxcpm_service_manager import VoxCPMServiceManager
+# Pure conversation imports must not load Qt service managers.
+def __getattr__(name):
+    if name == "TTSServiceManager":
+        from .tts_service_manager import TTSServiceManager
+        return TTSServiceManager
+    if name == "VoxCPMServiceManager":
+        from .voxcpm_service_manager import VoxCPMServiceManager
+        return VoxCPMServiceManager
+    raise AttributeError(name)
 
 __all__ = [
     "PetState",

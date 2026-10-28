@@ -3,7 +3,11 @@
 
 from .base_asr import ASREngine
 from .whisper_asr import FasterWhisperEngine
-from .asr_manager import ASRManager, WhisperWorker
+def __getattr__(name):
+    if name in {"ASRManager", "WhisperWorker"}:
+        from . import asr_manager
+        return getattr(asr_manager, name)
+    raise AttributeError(name)
 
 __all__ = [
     "ASREngine",

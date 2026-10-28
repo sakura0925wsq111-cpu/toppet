@@ -19,6 +19,7 @@ from audio.tts.tts_manager import TTSManager  # noqa: E402
 from core.client import (  # noqa: E402
     AIClient,
     AIReply,
+    StreamingReplyParser,
     StreamCancelled,
     StreamCancelToken,
 )
@@ -35,7 +36,7 @@ class _BlockingMemory:
         self.calls: list[tuple[str, str]] = []
         self.file_path = "fake-memory.json"
 
-    def get_prompt_text(self) -> str:
+    def get_prompt_text(self, _query_text=None) -> str:
         return ""
 
     def extract_from_conversation(self, user_text, reply, _client) -> None:
@@ -158,6 +159,36 @@ class StreamingClientTests(unittest.TestCase):
         self.assertEqual(reply.content, "你好。")
         self.assertEqual("".join(deltas), "你好。")
         self.assertEqual(emotions, ["HAPPY"])
+
+    def test_parenthetical_actions_are_removed_before_text_and_tts_callbacks(self):
+        deltas: list[str] = []
+        parser = StreamingReplyParser(on_text_delta=deltas.append)
+        for delta in ["HAPPY\n（轻", "轻抱住", "你）别难过。CPU", "（中央处理器）正常。"]:
+            parser.feed(delta)
+        parser.finish()
+
+        expected = "别难过。CPU（中央处理器）正常。"
+        self.assertEqual(parser.content, expected)
+        self.assertEqual("".join(deltas), expected)
+
+    def test_non_stream_reply_removes_actions_but_preserves_factual_parentheses(self):
+        normalized = AIClient.normalize_ai_reply({
+            "emotion": "HAPPY",
+            "content": "(微笑)你好。CPU（中央处理器）正常。",
+        })
+        self.assertEqual(
+            normalized["content"],
+            "你好。CPU（中央处理器）正常。",
+        )
+
+    def test_old_assistant_actions_are_not_sent_back_in_history(self):
+        client = AIClient(api_key="")
+        messages = client._build_messages(
+            "继续聊",
+            [{"role": "assistant", "content": "（摸摸头）没事。"}],
+            "system",
+        )
+        self.assertEqual(messages[1]["content"], "没事。")
 
     def test_failure_before_content_uses_non_stream_fallback(self):
         def failing_stream():

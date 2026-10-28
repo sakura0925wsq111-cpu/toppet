@@ -5,6 +5,7 @@ import json
 import threading
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -104,6 +105,25 @@ class _StreamingTTS:
             yield AudioChunk(bytes(640), 16_000, 1, 16, 0, True)
 
 
+class _SlowCloneTTS(_StreamingTTS):
+    should_buffer_sentence = True
+
+    def __init__(self, started: threading.Event):
+        super().__init__(started)
+        self.generated = 0
+
+    def synthesize_stream(self, text, cancel_event=None):
+        self.sentences.append(text)
+        self.started.set()
+        for sequence in range(4):
+            if cancel_event is not None and cancel_event.is_set():
+                return
+            self.generated += 1
+            yield AudioChunk(
+                bytes(640), 16_000, 1, 16, sequence, sequence == 3
+            )
+
+
 class LowLatencyAudioTests(unittest.TestCase):
     def test_incremental_resampling_matches_unsplit_stream(self):
         source = b"".join(
@@ -142,6 +162,27 @@ class LowLatencyAudioTests(unittest.TestCase):
         self.assertEqual(session.calls[0][0], "http://127.0.0.1:9890/tts/stream")
         self.assertTrue(session.calls[0][1]["stream"])
 
+    def test_voxcpm_adapts_steps_and_requests_safe_sentence_buffering(self):
+        source = bytes(480 * 2)
+        response = _PCMResponse([source])
+        session = _PCMSession(response)
+        engine = VoxCPMTTSEngine(
+            session=session,
+            inference_steps=3,
+            adaptive_steps=(3, 4),
+            buffer_rtf_threshold=0.95,
+        )
+        with patch(
+            "audio.tts.voxcpm_engine.time.perf_counter",
+            side_effect=[10.0, 10.02],
+        ):
+            chunks = list(engine.synthesize_stream("克隆声音保持不变"))
+        self.assertTrue(chunks)
+        self.assertEqual(session.calls[0][1]["json"]["inference_steps"], 3)
+        self.assertEqual(engine.selected_steps, 4)
+        self.assertTrue(engine.should_buffer_sentence)
+        self.assertGreater(engine.last_stream_metrics.rtf, 0.95)
+
     def test_ring_buffer_prebuffer_underflow_overflow_and_stale_session(self):
         ring = PlaybackRingModel(capacity=4096, prebuffer=1280, low_water=640, high_water=3200)
         ring.start("new")
@@ -150,11 +191,14 @@ class LowLatencyAudioTests(unittest.TestCase):
         self.assertEqual(ring.read(640), b"")
         ring.push("new", bytes(640))
         self.assertEqual(len(ring.read(640)), 640)
-        self.assertFalse(ring.low)
-        self.assertEqual(len(ring.read(640)), 640)
-        self.assertTrue(ring.low)
         self.assertEqual(ring.read(640), b"")
-        self.assertEqual(ring.underruns, 1)
+        self.assertTrue(ring.rebuffering)
+        self.assertEqual(ring.rebuffers, 1)
+        ring.push("new", bytes(640))
+        self.assertFalse(ring.rebuffering)
+        self.assertEqual(len(ring.read(640)), 640)
+        ring.mark_finished("new")
+        self.assertEqual(len(ring.read(640)), 640)
         ring.push("new", bytes(4096))
         with self.assertRaises(BufferError):
             ring.push("new", b"x")
@@ -189,15 +233,18 @@ class StreamingPipelineTests(unittest.TestCase):
         self.assertEqual(
             [chunk.sequence for chunk in audio], list(range(len(audio)))
         )
-        self.assertEqual(sum(chunk.pcm == bytes(640) for chunk in audio), 26)
+        self.assertEqual(sum(chunk.pcm == bytes(640) for chunk in audio), 10)
         event_types = [event["type"] for event in events]
         self.assertLess(event_types.index("stt_final"), event_types.index("tts_start"))
         self.assertEqual(
             [event["text"] for event in events if event["type"] == "tts_sentence_start"],
             tts.sentences,
         )
-        subtitles = [event for event in events if event["type"] == "subtitle"]
-        self.assertEqual(len(subtitles), 2)
+        response_ui = [
+            event for event in events if event["type"] == "response_ui"
+        ]
+        self.assertEqual(len(response_ui), 2)
+        self.assertTrue(all(event["emotion"] == "HAPPY" for event in response_ui))
 
     def test_cancelled_session_stops_before_late_second_sentence(self):
         pipeline, _brain, _tts = self._pipeline()
@@ -217,6 +264,34 @@ class StreamingPipelineTests(unittest.TestCase):
                 )
 
         asyncio.run(run())
+
+    def test_slow_clone_prefetches_only_safe_prefix_not_complete_sentence(self):
+        started = threading.Event()
+        brain = _StreamingBrain(started)
+        tts = _SlowCloneTTS(started)
+        pipeline = HostPipeline(
+            brain,
+            _MemoryASR(),
+            tts,
+            safe_tts_prefix_bytes=1280,
+            sentence_pause_frames=0,
+        )
+        generated_before_first_send: list[int] = []
+
+        async def send_audio(_chunk):
+            if not generated_before_first_send:
+                generated_before_first_send.append(tts.generated)
+
+        async def run():
+            await pipeline.process_streamed_audio(
+                bytes(640),
+                session_id="safe-prefix",
+                device_id="test-device",
+                send_audio=send_audio,
+            )
+
+        asyncio.run(run())
+        self.assertEqual(generated_before_first_send, [2])
 
 
 class V2WebSocketTests(unittest.TestCase):
@@ -279,6 +354,26 @@ class V2WebSocketTests(unittest.TestCase):
                 websocket.send_json({"type": "abort", "session_id": "gap"})
                 cancelled = websocket.receive_json()
                 self.assertEqual(cancelled, {"type": "cancelled", "session_id": "gap"})
+
+    def test_v2_accepts_scoped_device_playback_metrics(self):
+        with self.client as client:
+            with client.websocket_connect("/ws") as websocket:
+                self._hello(websocket)
+                websocket.send_json({
+                    "type": "latency",
+                    "session_id": "device-metric",
+                    "node": "playback_rebuffer_finished",
+                    "duration_ms": 420,
+                    "sequence": 7,
+                    "buffer_bytes": 16384,
+                })
+            records = client.get("/api/v2/latency").json()["records"]
+        metric = next(
+            record for record in records
+            if record["node"] == "playback_rebuffer_finished"
+        )
+        self.assertEqual(metric["duration_ms"], 420)
+        self.assertEqual(metric["buffer_bytes"], 16384)
 
 
 async def _append(target, value):

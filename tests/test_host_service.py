@@ -23,6 +23,9 @@ from host_service.server import create_app  # noqa: E402
 from host_service.subtitle import (  # noqa: E402
     MASK_BYTES,
     build_subtitle_event,
+    build_response_ui_event,
+    encode_rgb565_runs,
+    render_speech_bubble_rgb565,
     encode_zero_literal_rle,
     render_subtitle_mask,
 )
@@ -71,6 +74,14 @@ class _FakeVoiceService:
         self.stopped = True
 
 
+class _ReplyEmotionResolver:
+    def observe_user_input(self, _text):
+        return None
+
+    def resolve(self, _user_text, _assistant_text, model_emotion):
+        return SimpleNamespace(emotion=model_emotion)
+
+
 class HostServiceTests(unittest.TestCase):
     def test_raw_pcm_is_wrapped_as_16khz_mono_wav(self):
         wav_bytes = normalize_audio_payload(b"\0\0" * 160)
@@ -86,6 +97,7 @@ class HostServiceTests(unittest.TestCase):
             _FakeASR(),
             _FakeTTS(),
             character_id="personal",
+            emotion_resolver=_ReplyEmotionResolver(),
         )
         events: list[dict[str, object]] = []
 
@@ -215,6 +227,24 @@ class HostServiceTests(unittest.TestCase):
         self.assertEqual(len(mask), MASK_BYTES)
         self.assertEqual(bytes(decoded), mask)
         self.assertLess(len(encode_zero_literal_rle(mask)), len(mask))
+
+    def test_response_ui_contains_complete_board_ready_bubble(self):
+        import base64
+        import struct
+
+        rgb = render_speech_bubble_rgb565("回答表情和字幕应当一起出现。")
+        event = build_response_ui_event(
+            "回答表情和字幕应当一起出现。", "HAPPY", 12
+        )
+        encoded = base64.b64decode(event["data"])
+        decoded = bytearray()
+        for offset in range(0, len(encoded), 4):
+            count, color = struct.unpack_from("<HH", encoded, offset)
+            decoded.extend(struct.pack("<H", color) * count)
+        self.assertEqual(bytes(decoded), rgb)
+        self.assertEqual(event["emotion"], "HAPPY")
+        self.assertEqual(event["sequence"], 12)
+        self.assertLess(len(encoded), 32 * 1024)
 
 
 if __name__ == "__main__":

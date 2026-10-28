@@ -40,6 +40,7 @@ class LaoshaoziBrainTests(unittest.TestCase):
         prompt = self.brain.system_prompt
         self.assertIn("\u8001\u52fa\u5b50", prompt)
         self.assertNotIn("\u91ce\u539f\u65b0\u4e4b\u52a9", prompt)
+        self.assertIn("\u7981\u6b62\u7528\u4efb\u4f55\u62ec\u53f7\u63cf\u8ff0", prompt)
         self.assertTrue(
             self.brain._get_memory().file_path.endswith("memory_personal.json")
         )
@@ -70,8 +71,8 @@ class LaoshaoziDesktopTests(unittest.TestCase):
             self.assertTrue(all(key.startswith("personal/") for key in loaded))
             self.assertFalse(any(key.startswith("shinchan/") for key in loaded))
             self.assertIsNone(pet.tts_service)
-            self.assertIn("VoxCPM2", pet.tts_manager.engine_name)
-            self.assertIn("Yunxi", pet.tts_manager.engine_name)
+            self.assertIn("Qwen3-TTS", pet.tts_manager.engine_name)
+            self.assertNotIn("Yunxi", pet.tts_manager.engine_name)
         finally:
             pet.shutdown_services()
             pet.deleteLater()

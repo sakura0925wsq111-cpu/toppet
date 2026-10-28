@@ -6,7 +6,9 @@ import audioop
 import io
 import logging
 import threading
+import time
 import wave
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Iterator
 
@@ -25,6 +27,14 @@ class AudioChunk:
     bits_per_sample: int
     sequence: int
     is_final: bool = False
+
+
+@dataclass(frozen=True)
+class VoxCPMStreamMetrics:
+    inference_steps: int
+    elapsed_seconds: float
+    audio_seconds: float
+    rtf: float
 
 
 class IncrementalPCMResampler:
@@ -86,16 +96,49 @@ class VoxCPMTTSEngine(TTSEngine):
         timeout: float = 120.0,
         voice_id: str = "laoshaozi-personal",
         session: requests.Session | None = None,
+        adaptive_steps: tuple[int, ...] | None = None,
+        buffer_rtf_threshold: float = 0.95,
     ) -> None:
         self._api_url = api_url.rstrip("/")
         self._inference_steps = inference_steps
         self._timeout = timeout
         self._voice_id = voice_id
         self._session = session or requests.Session()
+        candidates = adaptive_steps or (inference_steps,)
+        self._adaptive_steps = tuple(dict.fromkeys(int(step) for step in candidates))
+        if not self._adaptive_steps or any(step < 1 for step in self._adaptive_steps):
+            raise ValueError("adaptive_steps must contain positive integers")
+        if inference_steps not in self._adaptive_steps:
+            self._adaptive_steps = (inference_steps, *self._adaptive_steps)
+        self._selected_steps = inference_steps
+        self._buffer_rtf_threshold = float(buffer_rtf_threshold)
+        self._metrics_lock = threading.Lock()
+        self._metrics_by_step: dict[int, deque[float]] = defaultdict(
+            lambda: deque(maxlen=3)
+        )
+        self._last_stream_metrics: VoxCPMStreamMetrics | None = None
 
     @property
     def engine_name(self) -> str:
-        return f"VoxCPM2 clone ({self._inference_steps} steps)"
+        if len(self._adaptive_steps) == 1:
+            return f"VoxCPM2 clone ({self._selected_steps} steps)"
+        choices = "/".join(str(step) for step in self._adaptive_steps)
+        return f"VoxCPM2 clone (adaptive {choices} steps)"
+
+    @property
+    def selected_steps(self) -> int:
+        with self._metrics_lock:
+            return self._selected_steps
+
+    @property
+    def last_stream_metrics(self) -> VoxCPMStreamMetrics | None:
+        with self._metrics_lock:
+            return self._last_stream_metrics
+
+    @property
+    def should_buffer_sentence(self) -> bool:
+        metrics = self.last_stream_metrics
+        return metrics is not None and metrics.rtf > self._buffer_rtf_threshold
 
     @property
     def voice_id(self) -> str:
@@ -109,10 +152,11 @@ class VoxCPMTTSEngine(TTSEngine):
         text = text.strip()
         if not text:
             raise ValueError("TTS text must not be blank")
+        steps = self.selected_steps
         try:
             response = self._session.post(
                 f"{self._api_url}/tts",
-                json={"text": text, "inference_steps": self._inference_steps},
+                json={"text": text, "inference_steps": steps},
                 timeout=(3.0, self._timeout),
             )
         except requests.Timeout as exc:
@@ -139,12 +183,16 @@ class VoxCPMTTSEngine(TTSEngine):
         text = text.strip()
         if not text:
             raise ValueError("TTS text must not be blank")
+        steps = self.selected_steps
+        started_at = time.perf_counter()
+        output_bytes = 0
+        completed = False
         try:
             response = self._session.post(
                 f"{self._api_url}/tts/stream",
                 json={
                     "text": text,
-                    "inference_steps": self._inference_steps,
+                    "inference_steps": steps,
                     "streaming_prefix_len": streaming_prefix_len,
                 },
                 timeout=(3.0, self._timeout),
@@ -183,6 +231,7 @@ class VoxCPMTTSEngine(TTSEngine):
                 if not pcm:
                     continue
                 if pending is not None:
+                    output_bytes += len(pending)
                     yield AudioChunk(
                         pcm=pending,
                         sample_rate=16_000,
@@ -195,6 +244,7 @@ class VoxCPMTTSEngine(TTSEngine):
             tail = resampler.feed(b"", final=True)
             if tail:
                 if pending is not None:
+                    output_bytes += len(pending)
                     yield AudioChunk(
                         pcm=pending,
                         sample_rate=16_000,
@@ -207,6 +257,7 @@ class VoxCPMTTSEngine(TTSEngine):
             if pending is not None and not (
                 cancel_event is not None and cancel_event.is_set()
             ):
+                output_bytes += len(pending)
                 yield AudioChunk(
                     pcm=pending,
                     sample_rate=16_000,
@@ -215,10 +266,55 @@ class VoxCPMTTSEngine(TTSEngine):
                     sequence=sequence,
                     is_final=True,
                 )
+            completed = True
         finally:
             close = getattr(response, "close", None)
             if callable(close):
                 close()
+            if completed and output_bytes:
+                self._record_stream_metrics(
+                    steps,
+                    elapsed_seconds=time.perf_counter() - started_at,
+                    audio_seconds=output_bytes / (16_000 * 2),
+                )
+
+    def _record_stream_metrics(
+        self, steps: int, *, elapsed_seconds: float, audio_seconds: float
+    ) -> None:
+        if audio_seconds <= 0:
+            return
+        rtf = elapsed_seconds / audio_seconds
+        metrics = VoxCPMStreamMetrics(
+            inference_steps=steps,
+            elapsed_seconds=round(elapsed_seconds, 3),
+            audio_seconds=round(audio_seconds, 3),
+            rtf=round(rtf, 3),
+        )
+        with self._metrics_lock:
+            self._last_stream_metrics = metrics
+            self._metrics_by_step[steps].append(rtf)
+            unprobed = [
+                candidate
+                for candidate in self._adaptive_steps
+                if not self._metrics_by_step[candidate]
+            ]
+            if unprobed:
+                self._selected_steps = unprobed[0]
+            else:
+                self._selected_steps = min(
+                    self._adaptive_steps,
+                    key=lambda candidate: sum(self._metrics_by_step[candidate])
+                    / len(self._metrics_by_step[candidate]),
+                )
+        logger.info(
+            "VoxCPM stream metrics steps=%d elapsed=%.3fs audio=%.3fs rtf=%.3f next_steps=%d buffer_next=%s",
+            steps,
+            elapsed_seconds,
+            audio_seconds,
+            rtf,
+            self.selected_steps,
+            rtf > self._buffer_rtf_threshold,
+        )
 
     def is_ready(self, timeout: float = 1.0) -> bool:
         try:

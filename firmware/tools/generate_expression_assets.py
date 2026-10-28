@@ -23,10 +23,19 @@ TEXT_LINE_HEIGHT = 32
 ASSET_HEADER = struct.Struct("<4sHHHHIIII")
 FRAME_ENTRY = struct.Struct("<IIHH")
 ASSET_MAGIC = b"TPA1"
-ASSET_VERSION = 1
+ASSET_VERSION = 2
+DIRTY_TILE_SIZE = 8
+DIRTY_TILE_COLUMNS = (PET_WIDTH + DIRTY_TILE_SIZE - 1) // DIRTY_TILE_SIZE
+DIRTY_TILE_ROWS = (PET_HEIGHT + DIRTY_TILE_SIZE - 1) // DIRTY_TILE_SIZE
+DIRTY_TILE_MASK_BYTES = (DIRTY_TILE_COLUMNS * DIRTY_TILE_ROWS + 7) // 8
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_SOURCE_DIR = REPOSITORY_ROOT / "assets" / "characters" / "personal"
 
 EXPRESSIONS = {
-    "NEUTRAL": "我在这里，随时陪你。",
+    # The default state intentionally has no speech bubble.  Reply subtitles
+    # are supplied by the host at runtime, while LISTENING keeps its local
+    # interaction hint for offline feedback.
+    "NEUTRAL": "",
     "HAPPY": "今天也要开开心心！",
     "GREETING": "你好呀，见到你真开心！",
     "LISTENING": "我在听，你慢慢说。",
@@ -193,7 +202,7 @@ def draw_preview(frame: Image.Image, text_mask: Image.Image) -> Image.Image:
     draw = ImageDraw.Draw(preview)
     bbox = text_mask.getbbox()
     if bbox is None:
-        raise RuntimeError("Subtitle mask is empty")
+        return preview
     padding_x = 17
     padding_y = 11
     bubble = (
@@ -251,11 +260,33 @@ def build_asset(
     ]
     palette_bytes = struct.pack("<256H", *palette565)
 
+    indexed_frames: list[bytes] = []
     encoded_frames = []
     for frame_index in range(len(frames)):
         top = frame_index * PET_HEIGHT
         indices = quantized.crop((0, top, PET_WIDTH, top + PET_HEIGHT)).tobytes()
+        indexed_frames.append(indices)
         encoded_frames.append(encode_runs(indices))
+
+    dirty_masks: list[bytes] = []
+    for frame_index, current in enumerate(indexed_frames):
+        previous = indexed_frames[frame_index - 1]
+        mask = bytearray(DIRTY_TILE_MASK_BYTES)
+        for tile_y in range(DIRTY_TILE_ROWS):
+            y0 = tile_y * DIRTY_TILE_SIZE
+            y1 = min(PET_HEIGHT, y0 + DIRTY_TILE_SIZE)
+            for tile_x in range(DIRTY_TILE_COLUMNS):
+                x0 = tile_x * DIRTY_TILE_SIZE
+                x1 = min(PET_WIDTH, x0 + DIRTY_TILE_SIZE)
+                changed = any(
+                    previous[y * PET_WIDTH + x] != current[y * PET_WIDTH + x]
+                    for y in range(y0, y1)
+                    for x in range(x0, x1)
+                )
+                if changed:
+                    bit = tile_y * DIRTY_TILE_COLUMNS + tile_x
+                    mask[bit >> 3] |= 0x80 >> (bit & 7)
+        dirty_masks.append(bytes(mask))
 
     text_mask_image, text_mask = make_text_mask(subtitle, font_path)
     palette_offset = ASSET_HEADER.size
@@ -280,7 +311,10 @@ def build_asset(
         text_mask_offset,
         len(text_mask),
     )
-    payload = header + palette_bytes + entries + text_mask + b"".join(encoded_frames)
+    payload = (
+        header + palette_bytes + entries + text_mask
+        + b"".join(encoded_frames) + b"".join(dirty_masks)
+    )
     output.write_bytes(payload)
 
     if preview_dir is not None:
@@ -309,12 +343,12 @@ def write_manifest(output: Path) -> None:
 
 
 def main() -> None:
-    repository_root = Path(__file__).resolve().parents[2]
+    repository_root = REPOSITORY_ROOT
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--source-dir",
         type=Path,
-        default=repository_root / "characters/personal/expressions",
+        default=DEFAULT_SOURCE_DIR,
     )
     parser.add_argument(
         "--output-dir",

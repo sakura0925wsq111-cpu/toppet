@@ -57,6 +57,7 @@ from audio import (
     VoxCPMTTSEngine,
 )
 from systems.voxcpm_service_manager import VoxCPMServiceManager
+from audio.tts.qwen_engine import QwenTTSEngine, resolve_tts_config
 
 logger = logging.getLogger(__name__)
 
@@ -183,21 +184,30 @@ class DesktopPet(QWidget):
     # TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT
 
     def _on_tts_service_ready(self):
-        """Mark VoxCPM2 ready; the primary/fallback chain is already active."""
+        """Mark the configured cloned-voice service ready."""
         self._voxcpm_ready = True
-        print("[DesktopPet] VoxCPM2 cloned voice ready; EdgeTTS remains fallback only")
+        print("[DesktopPet] Configured cloned voice ready")
 
     def _on_tts_service_failed(self, msg):
-        """The preconfigured chain will use EdgeTTS while VoxCPM2 is down."""
-        print(f"[DesktopPet] VoxCPM2 unavailable; EdgeTTS fallback active: {msg}")
+        """Keep the personal voice silent rather than substituting another voice."""
+        print(f"[DesktopPet] Cloned speech unavailable: {msg}")
 
     def _on_tts_service_status(self, msg):
         """Report background model loading without blocking the UI."""
-        print(f"[DesktopPet] VoxCPM2 status: {msg}")
+        print(f"[DesktopPet] Voice service: {msg}")
 
     def _start_optional_tts_service(self) -> None:
         """Start VoxCPM2 only for the personal/Laoshaozi profile."""
-        tts_config = self.mode_profile.get("tts", {})
+        tts_config = resolve_tts_config(self.mode_profile)
+        if tts_config.get("engine") == "qwen":
+            from systems.qwen_service_manager import QwenServiceManager
+            service = QwenServiceManager(tts_config)
+            service.service_ready.connect(self._on_tts_service_ready)
+            service.service_failed.connect(self._on_tts_service_failed)
+            service.status_update.connect(self._on_tts_service_status)
+            self.tts_service = service
+            service.start_service()
+            return
         if tts_config.get("engine") != "voxcpm" or not tts_config.get(
             "optional_voxcpm", False
         ):
@@ -873,9 +883,18 @@ class DesktopPet(QWidget):
             QApplication.quit()
 
     def _configure_tts_for_mode(self) -> None:
-        """Configure VoxCPM2 as primary and EdgeTTS strictly as fallback."""
+        """Configure the selected role's voice without silently changing identity."""
         profile = self.mode_profile
-        tts_config = profile.get("tts", {})
+        tts_config = resolve_tts_config(profile)
+        if tts_config.get("engine") == "qwen":
+            self.tts_manager.set_engine(QwenTTSEngine(
+                api_url=tts_config.get("api_url", "http://127.0.0.1:9891"),
+                timeout=float(tts_config.get("timeout_seconds", 180)),
+                voice_id=str(tts_config.get("voice", "qwen-user-20261028")),
+                runtime=tts_config.get("qwen_runtime", "baseline"),
+            ))
+            print(f"[DesktopPet] TTS: Qwen3-TTS clone for {self.mode_id}")
+            return
         voice_key = tts_config.get(
             "fallback_voice", tts_config.get("voice", "yunxi")
         )
@@ -887,14 +906,28 @@ class DesktopPet(QWidget):
                 inference_steps=int(tts_config.get("inference_steps", 4)),
                 timeout=float(tts_config.get("timeout_seconds", 120)),
                 voice_id=str(tts_config.get("voice", "laoshaozi-personal")),
+                adaptive_steps=tuple(
+                    int(step)
+                    for step in tts_config.get(
+                        "adaptive_inference_steps",
+                        [int(tts_config.get("inference_steps", 4))],
+                    )
+                ),
+                buffer_rtf_threshold=float(
+                    tts_config.get("buffer_rtf_threshold", 0.95)
+                ),
             )
-            self.tts_manager.set_engine(
-                FallbackTTSEngine(primary, edge_fallback)
-            )
-            print(
-                f"[DesktopPet] TTS primary: VoxCPM2; fallback: {voice_id} "
-                f"for {self.mode_id}"
-            )
+            if bool(tts_config.get("allow_voice_fallback", True)):
+                self.tts_manager.set_engine(
+                    FallbackTTSEngine(primary, edge_fallback)
+                )
+                print(
+                    f"[DesktopPet] TTS primary: VoxCPM2; fallback: {voice_id} "
+                    f"for {self.mode_id}"
+                )
+            else:
+                self.tts_manager.set_engine(primary)
+                print(f"[DesktopPet] TTS: VoxCPM2 clone only for {self.mode_id}")
             return
         self.tts_manager.set_engine(edge_fallback)
         print(f"[DesktopPet] TTS: {voice_id} for {self.mode_id}")
