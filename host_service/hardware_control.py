@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import secrets
 import threading
+import time
 import uuid
 
 import numpy as np
@@ -72,6 +73,11 @@ class Action:
     finished: asyncio.Event = field(default_factory=asyncio.Event)
     cancel: threading.Event = field(default_factory=threading.Event)
     task: asyncio.Task | None = None
+    timing_origin: float = field(default_factory=time.monotonic)
+    timings_ms: dict = field(default_factory=dict)
+
+    def mark(self, node):
+        self.timings_ms.setdefault(node, round((time.monotonic() - self.timing_origin) * 1000, 2))
 
     @property
     def wire_session(self):
@@ -83,6 +89,7 @@ class Action:
                 "bytes_sent": self.bytes_sent, "error": self.error,
                 "input_session_id": self.input_session_id,
                 "speech_mode": "buffered-full-context" if self.input_session_id else "streaming",
+                "timings_ms": dict(self.timings_ms),
                 "playback_confirmed": self.state == "completed"}
 
 
@@ -175,9 +182,11 @@ class HardwareControl:
             action.finished.set()
         elif kind == "latency":
             if command.get("node") == "first_i2s_write":
+                action.mark('device_first_i2s')
                 action.state = "playing"
             elif (command.get("node") == "playback_finished" and action.output_complete
                   and action.bytes_sent > 0):
+                action.mark('device_playback_finished')
                 action.state = "completed"
                 action.finished.set()
 
@@ -262,6 +271,7 @@ class HardwareControl:
             if first_send_at is None:
                 first_send_at = loop.time()
             await link.send_audio(action.wire_session, chunk)
+            action.mark('first_audio_sent')
             action.bytes_sent += len(chunk.pcm)
             if action.input_session_id:
                 # Bound queued old audio to about two seconds. Do not flood
@@ -290,6 +300,7 @@ class HardwareControl:
                             or len(chunk.pcm) % 2 or chunk.sequence != expected_sequence):
                         raise ValueError("invalid TTS PCM format or sequence")
                     expected_sequence += 1
+                    action.mark('first_tts_pcm')
                     seen = True
                     output_pcm = chunk.pcm
                     if action.input_session_id and self.speaker_gain_db:
@@ -316,6 +327,7 @@ class HardwareControl:
             await asyncio.wait_for(action.ready.wait(), self.handshake_timeout)
             check()
             action.state = "synthesizing"
+            action.mark('synthesis_started')
             await emit("emotion", emotion=action.emotion)
             await emit("tts_start", format="pcm_s16le", sample_rate=16000, channels=1, bits_per_sample=16)
             if action.input_session_id:
@@ -323,6 +335,7 @@ class HardwareControl:
                 # before transport so GPU chunk jitter cannot starve the device.
                 # Caption pages use real PCM length, without extra TTS requests.
                 pcm = await asyncio.wait_for(asyncio.to_thread(synthesize, buffered=True), timeout=90)
+                action.mark('synthesis_complete')
                 check()
                 await asyncio.to_thread(save_pcm, "tts-device", action.action_id, pcm,
                                         input_session_id=action.input_session_id, text=action.text,

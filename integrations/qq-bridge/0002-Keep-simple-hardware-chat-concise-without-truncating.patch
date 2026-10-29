@@ -1,0 +1,74 @@
+From 9d3dccf294786bdf4f1baccb9c67fceb516deb24 Mon Sep 17 00:00:00 2001
+From: sakura0925wsq111-cpu <sakura.0925wsq111@gmail.com>
+Date: Thu, 29 Oct 2026 22:47:16 +0800
+Subject: [PATCH 2/2] Keep simple hardware chat concise without truncating
+ detailed answers
+
+---
+ scripts/test-hardware-channel.mjs | 12 +++++++++++-
+ src/hardware-channel.js           | 13 ++++++++++++-
+ 2 files changed, 23 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/test-hardware-channel.mjs b/scripts/test-hardware-channel.mjs
+index c943b02..e4e7019 100644
+--- a/scripts/test-hardware-channel.mjs
++++ b/scripts/test-hardware-channel.mjs
+@@ -3,13 +3,23 @@ import fs from 'node:fs';
+ import os from 'node:os';
+ import path from 'node:path';
+ import { test } from 'node:test';
+-import { HardwareChannel } from '../src/hardware-channel.js';
++import { HardwareChannel, hardwareReplyGuidance } from '../src/hardware-channel.js';
+ import { HardwareContextStore, turnId } from '../src/hardware-context-store.js';
+ import { createProfileMemory } from '../src/long-term-memory.js';
+ import { allowedHardwareTool, apply as applyGuard } from '../src/hardware-tool-restrict.mjs';
+ 
+ const ok = value => ({ result: { ok: true, value } });
+ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
++
++test('hardware speech budget keeps greetings short and preserves explicit detail requests', () => {
++  for (const text of ['你好', '你好呀。', '在嗎？', '晚安']) {
++    assert(hardwareReplyGuidance(text).includes('4到12字'));
++  }
++  assert(hardwareReplyGuidance('我今天有點累').includes('10到30字'));
++  for (const text of ['你记得我在QQ里聊过什么吗', '详细解释一下这个方案', '請列出步驟']) {
++    assert(hardwareReplyGuidance(text).includes('不要为了短而省掉'));
++  }
++});
+ async function until(fn) { for (let i=0;i<200;i++) { if (fn()) return; await pause(5); } throw new Error('test timed out'); }
+ function fixture({ reply = true, actionState = 'completed', file = ':memory:' } = {}) {
+   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'qq-hardware-test-'));
+diff --git a/src/hardware-channel.js b/src/hardware-channel.js
+index 7c70a21..7e4f96d 100644
+--- a/src/hardware-channel.js
++++ b/src/hardware-channel.js
+@@ -19,6 +19,17 @@ const validLocalOrigin = raw => {
+   return url.origin;
+ };
+ 
++export function hardwareReplyGuidance(transcript) {
++  const text = String(transcript).trim();
++  const greeting = /^(你好[呀啊]?|您好|嗨|哈[喽囉啰]|在[吗嗎]|早上好|晚上好|早安|晚安|谢谢|謝謝)[！!。？?，,\s]*$/u.test(text);
++  const detail = /详细|詳細|解释|解釋|为什么|為什麼|步骤|步驟|回忆|回憶|列出|记得|記得|方案|分析|怎么|怎麼/.test(text);
++  const length = greeting ? '本轮是简单问候，只用一句自然回应，通常4到12字，不扩写安慰或重复旧话题。'
++    : detail ? '本轮涉及解释、回忆或具体问题，保留必要信息，最多120字；不要为了短而省掉用户明确要求的内容。'
++    : '普通当面闲聊优先1到2句、通常10到30字，直接回应当前讲话；无需重复复述用户原话或堆叠安慰。若问题需要更多信息，可展开到120字。';
++  return '先理解用户，再调用一次 hardware_reply 回答；保留原有人格与口吻，可选择表情。' + length
++    + '不要调用QQ工具、等待QQ消息或输出执行汇报。';
++}
++
+ export class HardwareChannel {
+   constructor({ root, config, api, ensureModel, isReady, getPersona, getPrivateState,
+     memory, log = () => {}, hostRequest, store }) {
+@@ -194,7 +205,7 @@ export class HardwareChannel {
+       '【该用户私聊轻量记忆】\n' + JSON.stringify(scopedHints).slice(0, 1800),
+       memory ? '【该用户长期记忆】\n' + memory : '',
+       `【本轮工具凭据】turn_id=${id}\nturn_token=${live.token}`,
+-      '先理解用户，再调用一次 hardware_reply 回答；用简短自然口语，最多120字，可选择表情。不要调用QQ工具、等待QQ消息或输出执行汇报。',
++      hardwareReplyGuidance(row.transcript),
+       '如用户明确要求记住或忘记事实，可先调用 hardware_memory；只处理本轮有直接依据的本人事实。',
+       '【本轮用户讲话】\n' + row.transcript,
+     ].filter(Boolean).join('\n\n');
+-- 
+2.54.0.windows.1
+

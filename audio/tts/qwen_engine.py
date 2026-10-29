@@ -28,12 +28,15 @@ def resolve_tts_config(profile: dict) -> dict:
 
 class QwenTTSEngine(TTSEngine):
     def __init__(self, api_url='http://127.0.0.1:9891', timeout=180.0,
-                 voice_id='qwen-user-20261028', session=None, runtime='baseline'):
+                 voice_id='qwen-user-20261028', session=None, runtime='baseline', delivery_mode='streaming'):
         self.api_url = api_url.rstrip('/')
         self.timeout = float(timeout)
         self._voice_id = voice_id
         self._session = session or requests.Session()
         self.runtime = runtime
+        if delivery_mode not in {'streaming', 'buffered'}:
+            raise ValueError('Invalid Qwen delivery mode')
+        self.delivery_mode = delivery_mode
 
     @property
     def engine_name(self):
@@ -52,7 +55,7 @@ class QwenTTSEngine(TTSEngine):
             raise ValueError('TTS text must not be blank')
         try:
             response = self._session.post(self.api_url + path,
-                json={'text': text.strip(), 'voice_id': self.voice_id},
+                json={'text': text.strip(), 'voice_id': self.voice_id, 'delivery_mode': self.delivery_mode},
                 timeout=(3.0, self.timeout), stream=stream)
         except requests.RequestException as exc:
             raise RuntimeError(f'Qwen TTS unavailable: {exc}') from exc

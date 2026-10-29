@@ -13,6 +13,7 @@ from pathlib import Path
 import threading
 import time
 import uuid
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import Response, StreamingResponse
@@ -27,6 +28,8 @@ class SpeechRequest(BaseModel):
     text: str = Field(min_length=1, max_length=500)
     voice_id: str = 'qwen-user-20261028'
     seed: int = 42
+    delivery_mode: Literal['streaming', 'buffered'] = 'streaming'
+    trace_codes: bool = False
     request_id: str = Field(default_factory=lambda: uuid.uuid4().hex, min_length=1, max_length=100)
 
 
@@ -95,9 +98,11 @@ def build_app(args):
                 return None
             torch.manual_seed(req.seed)
             started = time.perf_counter()
+            state.update(last_codec_seconds=None, last_acoustic_seconds=None, last_codec_sha256=None)
             if backend == 'fast':
                 source = stable_voice_clone_stream(runtime['model'], text=req.text,
-                    voice_clone_prompt=runtime['prompt'], max_new_tokens=512, chunk_size=8, cancel_event=cancelled)
+                    voice_clone_prompt=runtime['prompt'], max_new_tokens=512, chunk_size=8,
+                    cancel_event=cancelled, delivery_mode=req.delivery_mode, trace_codes=req.trace_codes)
             else:
                 def single():
                     waves, sr = runtime['model'].generate_voice_clone(text=req.text, language='Chinese',
@@ -117,12 +122,18 @@ def build_app(args):
                     if count == 0:
                         state['last_first_audio_seconds'] = round(time.perf_counter()-started, 3)
                     count += 1
+                    if _timing.get('codec_sha256'):
+                        state['last_codec_sha256'] = _timing['codec_sha256']
+                    if _timing.get('codec_seconds') is not None:
+                        state['last_codec_seconds'] = round(_timing['codec_seconds'], 3)
+                        state['last_acoustic_seconds'] = round(_timing['acoustic_seconds'], 3)
                     duration += len(audio)/sr
                     yield (np.clip(audio, -1, 1)*32767).astype('<i2').tobytes()
             finally:
                 source.close()
                 state.update(request_count=state['request_count']+1,
                     last_inference_seconds=round(time.perf_counter()-started, 3),
+                    last_delivery_mode=req.delivery_mode,
                     last_audio_seconds=duration, last_chunk_count=count, last_cancelled=cancelled.is_set())
         finally:
             lock.release()

@@ -32,6 +32,9 @@ def test_compensates_codec_boost_without_changing_audio_length(monkeypatch):
         # +12.5 dB at the existing codec recovers the source with rounding error.
         assert abs(float(samples.mean()) * 10 ** (12.5 / 20) - 30000) < 3
         assert control.get(accepted['action_id'])['playback_confirmed']
+        timing = control.get(accepted['action_id'])['timings_ms']
+        assert timing['synthesis_started'] <= timing['first_tts_pcm'] <= timing['synthesis_complete']
+        assert timing['synthesis_complete'] <= timing['first_audio_sent'] <= timing['device_playback_finished']
     asyncio.run(run())
 
 

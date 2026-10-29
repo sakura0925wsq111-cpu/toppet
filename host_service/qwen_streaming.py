@@ -8,6 +8,40 @@ the decoder directly and emit only the newly committed suffix instead.
 from __future__ import annotations
 
 import numpy as np
+import time
+import hashlib
+
+
+def decode_complete_utterance(codec_source, decode_prefix, sample_rate, cancel_event=None):
+    """For buffered playback, decode the complete acoustic prefix once.
+
+    Keep the same autoregressive tokens, reference and complete history. The
+    streaming path remains available when incremental audio is required.
+    """
+    pieces = []
+    source = iter(codec_source)
+    started = time.perf_counter()
+    try:
+        while cancel_event is None or not cancel_event.is_set():
+            try:
+                codes, _timing = next(source)
+            except StopIteration:
+                break
+            pieces.append(codes)
+        if not pieces or (cancel_event is not None and cancel_event.is_set()):
+            return
+        codec_seconds = time.perf_counter() - started
+        started = time.perf_counter()
+        audio = np.asarray(decode_prefix(pieces), dtype=np.float32)
+        if audio.ndim != 1 or not np.isfinite(audio).all():
+            raise RuntimeError('Invalid full-utterance audio')
+        if cancel_event is None or not cancel_event.is_set():
+            yield audio, sample_rate, {'codec_seconds': codec_seconds,
+                                      'acoustic_seconds': time.perf_counter() - started}
+    finally:
+        close = getattr(source, 'close', None)
+        if close:
+            close()
 
 
 def stream_full_prefix(codec_source, decode_prefix, sample_rate, cancel_event=None):
@@ -39,7 +73,7 @@ def stream_full_prefix(codec_source, decode_prefix, sample_rate, cancel_event=No
 
 
 def stable_voice_clone_stream(model, *, text, voice_clone_prompt, max_new_tokens=512,
-                              chunk_size=8, cancel_event=None):
+                              chunk_size=8, cancel_event=None, delivery_mode='streaming', trace_codes=False):
     # Import GPU dependencies only inside the companion process.
     import torch
     from faster_qwen3_tts.streaming import fast_generate_streaming
@@ -58,8 +92,12 @@ def stable_voice_clone_stream(model, *, text, voice_clone_prompt, max_new_tokens
             config=config, predictor_graph=model.predictor_graph, talker_graph=model.talker_graph,
             max_new_tokens=max_new_tokens, chunk_size=chunk_size)
 
+        last_digest = None
         def decode_prefix(chunks):
+            nonlocal last_digest
             generated = torch.cat(chunks, dim=0)
+            if trace_codes:
+                last_digest = hashlib.sha256(generated.detach().cpu().numpy().tobytes()).hexdigest()
             codes = torch.cat([ref_codes.to(generated.device), generated], dim=0) if ref_codes is not None else generated
             # Avoid tokenizer.decode's implicit 300-frame split; retain the
             # reference and all generated history for every acoustic decode.
@@ -69,8 +107,12 @@ def stable_voice_clone_stream(model, *, text, voice_clone_prompt, max_new_tokens
                 raise RuntimeError(f'Unexpected codec sample count: {len(full)} != {expected}')
             return full[reference_samples:].float().cpu().numpy()
 
-        stream = stream_full_prefix(source, decode_prefix, sr, cancel_event)
+        factory = decode_complete_utterance if delivery_mode == 'buffered' else stream_full_prefix
+        stream = factory(source, decode_prefix, sr, cancel_event)
         try:
-            yield from stream
+            for audio, rate, timing in stream:
+                if trace_codes:
+                    timing = {**timing, 'codec_sha256': last_digest}
+                yield audio, rate, timing
         finally:
             stream.close()

@@ -44,6 +44,7 @@ class BridgePipeline(HostPipeline):
         tts = QwenTTSEngine(api_url=voice.get("api_url", "http://127.0.0.1:9891"),
                             voice_id=voice.get("voice", "qwen-user-20261028"),
                             runtime=voice.get("qwen_runtime", "fast"),
+                            delivery_mode="buffered",
                             timeout=float(voice.get("timeout_seconds", 180)))
         asr = IsolatedWhisperEngine(model_size=asr_model, device=asr_device, compute_type=asr_compute_type)
         return cls(asr, tts, config, character_id=character_id, character_manager=manager)

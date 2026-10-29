@@ -91,6 +91,7 @@ def test_factory_does_not_instantiate_petbrain_or_chat_client(tmp_path):
         pipeline = BridgePipeline.from_bridge_config(config)
         assert pipeline.brain is None
         assert pipeline.tts_engine.voice_id == 'test-voice'
+        assert pipeline.tts_engine.delivery_mode == 'buffered'
 
 
 def test_reply_resumes_physical_wire_session_without_new_control_start():

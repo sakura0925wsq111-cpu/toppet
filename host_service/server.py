@@ -102,6 +102,7 @@ def create_app(
             "tts": service.tts_name,
             "chat_backend": getattr(service, "chat_backend", "petbrain"),
             "speaker_gain_db": hardware.speaker_gain_db,
+            "tts_delivery_mode": getattr(service.tts_engine, 'delivery_mode', None),
         }
 
     @app.get("/api/v1/info")
