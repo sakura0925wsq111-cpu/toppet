@@ -61,8 +61,10 @@ qq-bridge 的 `hardwareReplyGuidance` 只作用于硬件渠道：问候通常一
 
 ## 继续使用与剩余边界
 
-入口仍为 `D:\toppet\start-companion.ps1`。本轮自动审批在明确确认后仍拒绝工具启动桥接，用户手动运行此入口，桥接已恢复，服务保留运行。Qwen 和主机健康检查应分别显示 `last_delivery_mode=buffered`（完成硬件请求后）及 `tts_delivery_mode=buffered`。
+入口仍为 `D:\toppet\start-companion.ps1`。本轮自动审批在明确确认后仍拒绝工具启动桥接，用户手动运行此入口，桥接恢复后完成上述验收。Qwen 和主机健康检查应分别显示 `last_delivery_mode=buffered`（完成硬件请求后）及 `tts_delivery_mode=buffered`。
 
 QQ 网关在用户恢复服务后已连接；连接就绪不等于重新验证了真实 QQ 收发，本轮没有发送额外 QQ 测试消息。
 
 复杂问题或长回复仍可能等待更久，完整音频缓冲会随回复长度增加等待时间。不能保证所有对话都达到问候的 4.9 秒。后续继续追求更短首声时，应分别验证生成、声学边界、播放水位及打断，不能直接以牺牲识别或听感换取表面速度。
+
+当日结束时，已按用户要求关闭 TopPet、Whisper、Qwen、qq-bridge、专用 DSH/MCP 与 SnowLuma 相关服务及测试热点，复查无相关端口和工作进程残留。最终启动与版本交接见 [当日交接文档](handoff-2026-10-29.md)。
