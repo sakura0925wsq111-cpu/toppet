@@ -11,9 +11,10 @@ from urllib.parse import urlparse
 import httpx
 import numpy as np
 
-from audio.asr.whisper_asr import FasterWhisperEngine
+from audio.asr.isolated_whisper import IsolatedWhisperEngine
 from audio.tts.qwen_engine import QwenTTSEngine, resolve_tts_config
 from systems.character_manager import CharacterManager
+from common.audio_capture import save_pcm, save_metadata
 from .audio import validate_audio_parameters
 from .pipeline import HostPipeline, PipelineCancelled, PipelineResult
 
@@ -30,7 +31,7 @@ class BridgePipeline(HostPipeline):
         self.client_factory = client_factory
 
     @classmethod
-    def from_bridge_config(cls, config_path=None, *, character_id="personal", asr_model="base",
+    def from_bridge_config(cls, config_path=None, *, character_id="personal", asr_model="small",
                            asr_device="cpu", asr_compute_type="int8"):
         path = Path(config_path or os.getenv("TOPPET_BRIDGE_CONFIG", r"D:\dafeiyu\qq-bridge\hardware.channel.local.json"))
         config = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -44,7 +45,7 @@ class BridgePipeline(HostPipeline):
                             voice_id=voice.get("voice", "qwen-user-20261028"),
                             runtime=voice.get("qwen_runtime", "fast"),
                             timeout=float(voice.get("timeout_seconds", 180)))
-        asr = FasterWhisperEngine(model_size=asr_model, device=asr_device, compute_type=asr_compute_type)
+        asr = IsolatedWhisperEngine(model_size=asr_model, device=asr_device, compute_type=asr_compute_type)
         return cls(asr, tts, config, character_id=character_id, character_manager=manager)
 
     def input_ready(self, session_id):
@@ -81,8 +82,13 @@ class BridgePipeline(HostPipeline):
                     'input_pcm session=%s duration_ms=%d rms=%.1f peak=%.0f', session_id,
                     len(pcm) * 1000 // 32000, float(np.sqrt(np.mean(samples * samples))),
                     float(np.max(np.abs(samples))))
+                await asyncio.to_thread(save_pcm, "microphone", session_id, pcm,
+                                        sample_rate=sample_rate, device_id=device_id,
+                                        asr=self.asr_name)
                 self.latency.record("asr_started", session_id=session_id, device_id=device_id)
                 transcript = (await asyncio.to_thread(self._transcribe_pcm, pcm, sample_rate)).strip()
+                await asyncio.to_thread(save_metadata, "microphone", session_id,
+                                        transcript=transcript)
                 self._check_cancel(cancelled)
                 if not transcript:
                     raise ValueError("没有听清语音")
@@ -125,3 +131,6 @@ class BridgePipeline(HostPipeline):
     def close(self):
         for event in self._active_cancellations.values():
             event.set()
+        close = getattr(self.asr_engine, 'close', None)
+        if callable(close):
+            close()

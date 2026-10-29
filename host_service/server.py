@@ -101,6 +101,7 @@ def create_app(
             "asr": service.asr_name,
             "tts": service.tts_name,
             "chat_backend": getattr(service, "chat_backend", "petbrain"),
+            "speaker_gain_db": hardware.speaker_gain_db,
         }
 
     @app.get("/api/v1/info")
@@ -659,7 +660,7 @@ def main() -> None:
     parser.add_argument("--host", default=os.getenv("TOPPET_HOST", "0.0.0.0"))
     parser.add_argument("--port", type=int, default=int(os.getenv("TOPPET_PORT", "8765")))
     parser.add_argument("--character", default="personal")
-    parser.add_argument("--asr-model", default="base")
+    parser.add_argument("--asr-model", default=os.getenv("TOPPET_ASR_MODEL", "small"))
     parser.add_argument("--asr-device", default="cpu")
     parser.add_argument("--asr-compute-type", default="int8")
     parser.add_argument("--chat-backend", choices=["qq-bridge", "petbrain"], default=os.getenv("TOPPET_CHAT_BACKEND", "qq-bridge"))

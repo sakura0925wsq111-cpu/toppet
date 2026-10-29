@@ -6,6 +6,7 @@ import threading
 from collections.abc import Iterator
 
 import requests
+from common.audio_capture import capture_enabled, save_pcm
 
 from .base_tts import TTSEngine
 from .voxcpm_engine import AudioChunk, IncrementalPCMResampler
@@ -86,6 +87,7 @@ class QwenTTSEngine(TTSEngine):
                 raise RuntimeError('Qwen service must return pcm_s16le')
             resampler = IncrementalPCMResampler(int(headers['X-Sample-Rate']),
                 source_channels=int(headers['X-Channels']), bits_per_sample=int(headers['X-Bits-Per-Sample']))
+            diagnostic = bytearray() if capture_enabled() else None
             # Read on a daemon thread: no socket read can hold up a cancelled turn.
             import queue
             blocks = queue.Queue(maxsize=8)
@@ -123,6 +125,10 @@ class QwenTTSEngine(TTSEngine):
                         raise RuntimeError(f'Qwen PCM receive failed: {block}') from block
                     if block is None:
                         completed = True
+                        if diagnostic is not None:
+                            save_pcm('tts-native', headers.get('X-Request-Id') or text, bytes(diagnostic),
+                                     sample_rate=int(headers['X-Sample-Rate']), channels=int(headers['X-Channels']),
+                                     text=text, note='Native Qwen stream before device resampling')
                         resampler.feed(b'', final=True)
                         if not seen:
                             raise RuntimeError('Qwen TTS stream returned no PCM')
@@ -130,6 +136,8 @@ class QwenTTSEngine(TTSEngine):
                         # of every codec chunk just to discover the next chunk.
                         yield AudioChunk(b'', 16000, 1, 16, sequence, True)
                         return
+                    if diagnostic is not None:
+                        diagnostic.extend(block)
                     pcm = resampler.feed(block)
                     if pcm:
                         seen = True

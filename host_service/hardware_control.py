@@ -5,16 +5,20 @@ import asyncio
 from dataclasses import dataclass, field
 import hmac
 import ipaddress
+import math
 import os
 from pathlib import Path
 import secrets
 import threading
 import uuid
 
+import numpy as np
+
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field
 
 from common.paths import LOGS_DIR
+from common.audio_capture import save_pcm
 from .playback_windows import PlaybackWindowWriter, MIN_WINDOW_BYTES
 from .subtitle import paginate_subtitle_text
 
@@ -88,6 +92,9 @@ class HardwareControl:
         self._token = token
         self.handshake_timeout = handshake_timeout
         self.playback_timeout = playback_timeout
+        self.speaker_gain_db = float(os.getenv("TOPPET_SPEAKER_GAIN_DB", "0"))
+        if not math.isfinite(self.speaker_gain_db) or not -40 <= self.speaker_gain_db <= 0:
+            raise ValueError("TOPPET_SPEAKER_GAIN_DB must be between -40 and 0 dB")
         self.devices: dict[str, DeviceLink] = {}
         self.actions: dict[str, Action] = {}
 
@@ -284,10 +291,14 @@ class HardwareControl:
                         raise ValueError("invalid TTS PCM format or sequence")
                     expected_sequence += 1
                     seen = True
+                    output_pcm = chunk.pcm
+                    if action.input_session_id and self.speaker_gain_db:
+                        samples = np.frombuffer(output_pcm, dtype='<i2').astype(np.float64)
+                        output_pcm = np.rint(samples * 10 ** (self.speaker_gain_db / 20)).astype('<i2').tobytes()
                     if buffered:
-                        pcm.extend(chunk.pcm)
+                        pcm.extend(output_pcm)
                     else:
-                        asyncio.run_coroutine_threadsafe(writer.write(chunk.pcm), loop).result(timeout=10)
+                        asyncio.run_coroutine_threadsafe(writer.write(output_pcm), loop).result(timeout=10)
                 if not seen:
                     raise ValueError("TTS stream returned no PCM")
                 return bytes(pcm)
@@ -313,6 +324,10 @@ class HardwareControl:
                 # Caption pages use real PCM length, without extra TTS requests.
                 pcm = await asyncio.wait_for(asyncio.to_thread(synthesize, buffered=True), timeout=90)
                 check()
+                await asyncio.to_thread(save_pcm, "tts-device", action.action_id, pcm,
+                                        input_session_id=action.input_session_id, text=action.text,
+                                        speaker_gain_db=self.speaker_gain_db,
+                                        note="Samples prepared for device; not proof of speaker playback")
                 pages = paginate_subtitle_text(action.text)
                 weights = [max(1, len(page.strip())) for page in pages]
                 total_weight = sum(weights)

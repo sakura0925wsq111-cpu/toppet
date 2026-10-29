@@ -82,6 +82,8 @@ def test_long_voice_keeps_all_samples():
             seen['samples'] = source.size
             return iter([SimpleNamespace(text='完整长句')]), None
     engine = FasterWhisperEngine(model_size='base'); engine._model = Model()
-    original = bytes(128000)
+    # Use a bounded non-silent waveform. Pure digital silence is now rejected
+    # before decoding rather than relying on a model to invent a transcript.
+    original = (1000 * np.sin(2 * np.pi * 400 * np.arange(64000) / 16000)).astype('<i2').tobytes()
     assert engine.transcribe_pcm(original) == '完整长句'
     assert seen['samples'] == 64000

@@ -25,12 +25,45 @@ FasterWhisper 引擎 —— 本地语音识别
 from __future__ import annotations
 
 import os
+import logging
+from pathlib import Path
 
 import numpy as np
 
 from common.paths import WHISPER_MODELS_DIR
 
 from .base_asr import ASREngine
+
+
+def prepare_hardware_audio(audio: np.ndarray) -> np.ndarray:
+    """Keep quiet speech while suppressing measured ADC startup impulses.
+
+    Operates on a copy, preserving original diagnostic audio. Only short,
+    isolated full-scale pulses in the first 200 ms qualify for suppression;
+    loud speech elsewhere is not removed or cut off.
+    """
+    source = np.asarray(audio, dtype=np.float32).reshape(-1).copy()
+    if source.size < 2:
+        return source
+    hits = np.flatnonzero(np.abs(source[:3200]) >= .98)
+    if 0 < hits.size <= 64:
+        groups = np.split(hits, np.where(np.diff(hits) > 1)[0] + 1)
+        for group in groups:
+            if len(group) <= 32:
+                start, end = max(0, int(group[0]) - 128), min(len(source), int(group[-1]) + 256)
+                source[start:end] = 0
+    # These are bounded push-to-talk arrays, not a live streaming resampler.
+    spectrum = np.fft.rfft(source)
+    spectrum[np.fft.rfftfreq(source.size, 1 / 16000) < 70] = 0
+    source = np.fft.irfft(spectrum, n=source.size).astype(np.float32)
+    body = source[3200:] if len(source) > 6400 else source
+    robust_peak = float(np.quantile(np.abs(body), .999))
+    if robust_peak < 2 / 32768:
+        return np.zeros_like(source)
+    gain = min(100.0, max(1.0, .35 / robust_peak))
+    logging.getLogger(__name__).info('asr_input gain_db=%.1f startup_clip_samples=%d',
+                                  20 * np.log10(gain), hits.size)
+    return np.clip(source * gain, -.98, .98)
 
 
 # =============================================================================
@@ -107,6 +140,9 @@ class FasterWhisperEngine(ASREngine):
             audio = np.asarray(pcm, dtype=np.float32).reshape(-1)
         if not audio.size:
             return ""
+        audio = prepare_hardware_audio(audio)
+        if not np.any(audio):
+            return ""
         return self._transcribe_source(audio)
 
     def _transcribe_source(self, source: str | np.ndarray) -> str:
@@ -120,10 +156,16 @@ class FasterWhisperEngine(ASREngine):
         segments, _info = self._model.transcribe(
             source,
             language=self._language if self._language != "auto" else None,
-            beam_size=3 if short else 1,
+            beam_size=5,
             temperature=0.0,
             condition_on_previous_text=False,
-            initial_prompt="中文口语对话。专有词：QQ、大肥鱼、桌宠。",
+            # No initial_prompt. It was measured to be actively harmful on this
+            # device: when the microphone delivers no intelligible speech,
+            # Whisper echoes the prompt as if it were the transcript. A real
+            # 3.48 s capture produced "语语对话。专有词：Q。" repeated nine times,
+            # matching byte-for-byte the output for pure noise with the same
+            # prompt. Without the prompt the same input returns an empty string,
+            # which surfaces as "没有听清语音" instead of invented text.
             max_new_tokens=32 if short else 160,
             # GPIO18 already supplies an exact push-to-talk boundary. A
             # second VAD pass can erase quiet short Chinese syllables from the
@@ -133,7 +175,8 @@ class FasterWhisperEngine(ASREngine):
         )
 
         # 拼接所有识别片段
-        text_parts = [seg.text.strip() for seg in segments if seg.text.strip()]
+        text_parts = [seg.text.strip() for seg in segments
+                      if seg.text.strip() and getattr(seg, 'no_speech_prob', 0) < .65]
         return "".join(text_parts) if text_parts else ""
 
     def preload(self) -> None:
@@ -158,10 +201,15 @@ class FasterWhisperEngine(ASREngine):
         # 确保缓存目录存在
         os.makedirs(self.DEFAULT_MODEL_DIR, exist_ok=True)
 
+        cached = Path(self.DEFAULT_MODEL_DIR) / f'models--Systran--faster-whisper-{self._model_size}' / 'snapshots'
+        snapshots = [p for p in cached.glob('*') if (p / 'model.bin').exists() and (p / 'config.json').exists()]
+        model_path = str(max(snapshots, key=lambda p: p.stat().st_mtime)) if snapshots else self._model_size
         self._model = WhisperModel(
-            self._model_size,
+            model_path,
             device=self._device,
             compute_type=self._compute_type,
+            cpu_threads=4,
+            local_files_only=bool(snapshots),
             download_root=self.DEFAULT_MODEL_DIR,
         )
         print(f"[FasterWhisper] 模型加载完成")

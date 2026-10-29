@@ -87,7 +87,7 @@ def test_factory_does_not_instantiate_petbrain_or_chat_client(tmp_path):
     with patch('core.pet_brain.PetBrain.__init__', side_effect=AssertionError('must not instantiate PetBrain')), \
             patch('core.client.AIClient.__init__', side_effect=AssertionError('must not instantiate AIClient')), \
             patch('host_service.bridge_pipeline.CharacterManager', return_value=manager), \
-            patch('host_service.bridge_pipeline.FasterWhisperEngine'):
+            patch('host_service.bridge_pipeline.IsolatedWhisperEngine'):
         pipeline = BridgePipeline.from_bridge_config(config)
         assert pipeline.brain is None
         assert pipeline.tts_engine.voice_id == 'test-voice'
